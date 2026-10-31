@@ -1,0 +1,11 @@
+Description:           Daily Index of EDGAR Dissemination Feed by Company Name
+Last Data Received:    October 29, 2026
+Comments:              webmaster@sec.gov
+Anonymous FTP:         ftp://ftp.sec.gov/edgar/
+
+CIK|Company Name|Form Type|Date Filed|File Name
+--------------------------------------------------------------------------------
+1234567|Acme Robotics Inc|4|20261029|edgar/data/1234567/0001999001-26-000011.txt
+1999001|DOE JANE A|4|20261029|edgar/data/1999001/0001999001-26-000011.txt
+1234567|Acme Robotics Inc|SCHEDULE 13D|20261029|edgar/data/1234567/0000921895-26-002222.txt
+70858|BANK OF EXAMPLE|424B2|20261029|edgar/data/70858/0000070858-26-000999.txt

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/ownership" xmlns:ns2="http://www.sec.gov/edgar/common">
+    <headerData>
+        <submissionType>144</submissionType>
+        <filerInfo>
+            <filer>
+                <filerCredentials>
+                    <cik>0001999001</cik>
+                    <ccc>XXXXXXXX</ccc>
+                </filerCredentials>
+            </filer>
+            <liveTestFlag>LIVE</liveTestFlag>
+        </filerInfo>
+    </headerData>
+    <formData>
+        <issuerInfo>
+            <issuerCik>0001234567</issuerCik>
+            <issuerName>Acme Robotics Inc</issuerName>
+            <secFileNumber>001-39999</secFileNumber>
+            <issuerAddress>
+                <ns2:street1>1 Robot Way</ns2:street1>
+                <ns2:city>Austin</ns2:city>
+                <ns2:stateOrCountry>TX</ns2:stateOrCountry>
+                <ns2:zipCode>78701</ns2:zipCode>
+            </issuerAddress>
+            <issuerContactPhone>5125551212</issuerContactPhone>
+            <nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>DOE JANE A</nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>
+            <relationshipsToIssuer>
+                <relationshipToIssuer>Officer</relationshipToIssuer>
+                <relationshipToIssuer>Director</relationshipToIssuer>
+            </relationshipsToIssuer>
+        </issuerInfo>
+        <securitiesInformation>
+            <securitiesClassTitle>Common</securitiesClassTitle>
+            <brokerOrMarketmakerDetails>
+                <name>Morgan Stanley Smith Barney LLC Executive Financial Services</name>
+                <address>
+                    <ns2:street1>1 New York Plaza</ns2:street1>
+                    <ns2:city>New York</ns2:city>
+                    <ns2:stateOrCountry>NY</ns2:stateOrCountry>
+                    <ns2:zipCode>10004</ns2:zipCode>
+                </address>
+            </brokerOrMarketmakerDetails>
+            <noOfUnitsSold>400000</noOfUnitsSold>
+            <aggregateMarketValue>9004000.00</aggregateMarketValue>
+            <noOfUnitsOutstanding>60000000</noOfUnitsOutstanding>
+            <approxSaleDate>11/03/2026</approxSaleDate>
+            <securitiesExchangeName>NASDAQ</securitiesExchangeName>
+        </securitiesInformation>
+        <securitiesToBeSold>
+            <securitiesClassTitle>Common</securitiesClassTitle>
+            <acquiredDate>02/28/2019</acquiredDate>
+            <natureOfAcquisitionTransaction>Founder Stock</natureOfAcquisitionTransaction>
+            <nameOfPersonfromWhomAcquired>Issuer</nameOfPersonfromWhomAcquired>
+            <isGiftTransaction>N</isGiftTransaction>
+            <amountOfSecuritiesAcquired>400000</amountOfSecuritiesAcquired>
+            <paymentDate>02/28/2019</paymentDate>
+            <natureOfPayment>Cash</natureOfPayment>
+        </securitiesToBeSold>
+        <nothingToReportFlagOnSecuritiesSoldInPast3Months>N</nothingToReportFlagOnSecuritiesSoldInPast3Months>
+        <securitiesSoldInPast3Months>
+            <sellerDetails>
+                <name>DOE JANE A</name>
+                <address>
+                    <ns2:street1>1 Robot Way</ns2:street1>
+                    <ns2:city>Austin</ns2:city>
+                    <ns2:stateOrCountry>TX</ns2:stateOrCountry>
+                    <ns2:zipCode>78701</ns2:zipCode>
+                </address>
+            </sellerDetails>
+            <securitiesClassTitle>Common</securitiesClassTitle>
+            <saleDate>09/15/2026</saleDate>
+            <amountOfSecuritiesSold>50000</amountOfSecuritiesSold>
+            <grossProceeds>1400000.00</grossProceeds>
+        </securitiesSoldInPast3Months>
+        <noticeSignature>
+            <noticeDate>10/30/2026</noticeDate>
+            <planAdoptionDates/>
+            <signature>/s/ Jane A. Doe</signature>
+        </noticeSignature>
+    </formData>
+</edgarSubmission>

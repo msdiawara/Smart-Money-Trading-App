@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/ownership" xmlns:com="http://www.sec.gov/edgar/common">
+  <headerData>
+    <submissionType>144</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001777001</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <issuerInfo>
+      <issuerCik>0001045810</issuerCik>
+      <issuerName>NVIDIA CORP</issuerName>
+      <secFileNumber>000-23985</secFileNumber>
+      <issuerAddress>
+        <com:street1>2788 San Tomas Expressway</com:street1>
+        <com:city>Santa Clara</com:city>
+        <com:stateOrCountry>CA</com:stateOrCountry>
+        <com:zipCode>95051</com:zipCode>
+      </issuerAddress>
+      <issuerContactPhone>4084862000</issuerContactPhone>
+      <nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>HUANG JEN HSUN</nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>
+      <relationshipsToIssuer>
+        <relationshipToIssuer>Officer</relationshipToIssuer>
+      </relationshipsToIssuer>
+    </issuerInfo>
+    <securitiesInformation>
+      <securitiesClassTitle>Common</securitiesClassTitle>
+      <brokerOrMarketmakerDetails>
+        <name>J.P. Morgan Securities LLC</name>
+        <address>
+          <com:street1>270 Park Avenue</com:street1>
+          <com:city>New York</com:city>
+          <com:stateOrCountry>NY</com:stateOrCountry>
+          <com:zipCode>10017</com:zipCode>
+        </address>
+      </brokerOrMarketmakerDetails>
+      <noOfUnitsSold>120000</noOfUnitsSold>
+      <aggregateMarketValue>21888000</aggregateMarketValue>
+      <noOfUnitsOutstanding>24400000000</noOfUnitsOutstanding>
+      <approxSaleDate>11/02/2026</approxSaleDate>
+      <securitiesExchangeName>Nasdaq</securitiesExchangeName>
+    </securitiesInformation>
+    <securitiesToBeSold>
+      <securitiesClassTitle>Common</securitiesClassTitle>
+      <acquiredDate>03/20/2024</acquiredDate>
+      <natureOfAcquisitionTransaction>RSU/PSU</natureOfAcquisitionTransaction>
+      <nameOfPersonfromWhomAcquired>Issuer</nameOfPersonfromWhomAcquired>
+      <isGiftTransaction>N</isGiftTransaction>
+      <amountOfSecuritiesAcquired>120000</amountOfSecuritiesAcquired>
+      <paymentDate>03/20/2024</paymentDate>
+      <natureOfPayment>N/A</natureOfPayment>
+    </securitiesToBeSold>
+    <nothingToReportFlagOnSecuritiesSoldInPast3Months>Y</nothingToReportFlagOnSecuritiesSoldInPast3Months>
+    <noticeSignature>
+      <noticeDate>10/30/2026</noticeDate>
+      <planAdoptionDates>
+        <planAdoptionDate>03/14/2026</planAdoptionDate>
+      </planAdoptionDates>
+      <signature>/s/ Jen-Hsun Huang</signature>
+    </noticeSignature>
+  </formData>
+</edgarSubmission>

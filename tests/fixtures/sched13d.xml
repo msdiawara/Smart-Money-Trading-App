@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:com="http://www.sec.gov/edgar/common">
+  <headerData><submissionType>SCHEDULE 13D</submissionType></headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Common Stock, $0.01 par value</securitiesClassTitle>
+      <dateOfEvent>10/21/2026</dateOfEvent>
+      <issuerInfo><issuerCIK>0001234567</issuerCIK><issuerCUSIP>00508Y102</issuerCUSIP><issuerName>Acme Robotics Inc</issuerName></issuerInfo>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo><reportingPersonName>Starboard Value LP</reportingPersonName><aggregateAmountOwned>5400000</aggregateAmountOwned><percentOfClass>8.7</percentOfClass></reportingPersonInfo>
+      <reportingPersonInfo><reportingPersonName>Jeffrey C. Smith</reportingPersonName><aggregateAmountOwned>5400000</aggregateAmountOwned><percentOfClass>8.7</percentOfClass></reportingPersonInfo>
+    </reportingPersons>
+    <items1To7><item4><transactionPurpose>The Reporting Persons believe the Shares are undervalued and intend to engage with the Board regarding capital allocation, operational improvements and board composition.</transactionPurpose></item4><item3><fundsSource>WC</fundsSource></item3></items1To7>
+  </formData>
+</edgarSubmission>

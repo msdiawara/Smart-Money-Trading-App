@@ -1,0 +1,31 @@
+Clerk of the House of Representatives • Legislative Resource Center • B81 Cannon Building • Washington, DC 20515
+F I
+Filer Information
+Name: Hon. Jane Q. Member
+Status: Member
+State/District: CA11
+T
+Transactions
+ID Owner Asset Transaction Date Notification Amount Cap.
+Type Date Gains >
+$200?
+SP NVIDIA Corporation - Common Stock P 10/02/2026 10/03/2026 $250,001 -
+(NVDA) [ST] $500,000
+F S: New
+SP Alphabet Inc. - Class C Capital Stock P 10/06/2026 10/06/2026 $1,000,001 -
+(GOOG) [OP] $5,000,000
+F S: New
+D: Purchased 20 call options with a strike price of $150 and an expiration date of
+1/15/2027.
+JT Microsoft Corporation - Common Stock S (partial) 09/30/2026 10/01/2026 $15,001 - $50,000
+(MSFT) [ST]
+F S: New
+Apple Inc. - Common Stock (AAPL) [ST] S 09/29/2026 09/30/2026 $1,001 - $15,000
+F S: New
+* For the complete list of asset type abbreviations, please visit https://fd.house.gov/reference/asset-type-codes.aspx.
+I P O
+Did this filing include any IPO stock? No
+C S
+Certification and Signature
+I CERTIFY that the statements I have made on the attached Periodic Transaction Report are true, complete, and correct to the best of my knowledge and belief.
+Digitally Signed: Hon. Jane Q. Member , 10/07/2026
