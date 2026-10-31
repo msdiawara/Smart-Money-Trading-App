@@ -1,0 +1,179 @@
+# Smart Money Radar — settings you can edit on GitHub (pencil icon) from your phone.
+# Secrets (API keys, your e-mail) do NOT go here — add them under Settings → Secrets and variables → Actions.
+
+app:
+  name: "Smart Money Radar"
+  max_events: 2500            # how many recent trades the app keeps
+  feed_days: 120              # drop events older than this
+
+alerts:
+  # Push a notification when a new trade scores at least this high (0-100). 70 = "Strong" signals only.
+  min_score: 70
+  # Always alert on these, whatever the score (tickers and/or names, case-insensitive)
+  watch_tickers: []           # e.g. ["NVDA", "PLTR"]
+  watch_people: []            # e.g. ["Pelosi", "Pershing Square", "Cook Timothy"]
+  max_per_run: 6              # cap per refresh (alerts are bundled)
+  max_per_day: 60             # stays far below ntfy's free 250/day limit
+  quiet_hours_et: [23, 6]     # no pushes between 11pm and 6am Eastern (they're queued to the morning)
+
+analyst:
+  # Claude as the analyst (needs the ANTHROPIC_API_KEY secret; see the setup guide). Runs every ~20 minutes in its
+  # own workflow. Real costs are computed from the API's usage reports and shown on the Data tab.
+  enabled: true
+  daily_budget_usd: 3.0       # hard daily cap. Max 5x/20x plans include $100/$200 a month of API credit.
+  deep_model: claude-opus-5-5 # Fable 5.1-level on most work at 40% of the price. Or claude-fable-5-1 (2.5x the cost).
+  deep_effort: max            # low | medium | high | xhigh | max
+  deep_max_searches: 6        # web searches per deep analysis ($10 per 1,000 searches)
+  web_search_tool: web_search_20250305   # the basic tool; newer versions add code-run "dynamic filtering" (extra billing)
+  deep_max_tokens: 20000      # output cap per call (keeps a non-streamed call well under ~10 minutes)
+  deep_max_task_usd: 2.5      # a single deep analysis stops if it would cost more than this
+  standard_max_task_usd: 0.4
+  standard_model: claude-opus-5-5
+  standard_effort: low        # quick reads (no web research) for notable signals
+  deep_min_score: 70          # deep research for strong signals (and anything on your watchlist)
+  standard_min_score: 50      # quick reads for notable signals
+  max_deep_per_run: 4
+  max_standard_per_run: 12
+  ideas_per_day: 3            # deep write-ups of the best screen ideas
+  brief_times_et: ["07:45"]   # weekday market brief, in quotes (add "16:45" for an after-close brief)
+  parallel: 3
+  forecasts_per_day: 3        # Claude price forecasts (watchlist first), each ~$0.30-0.60 at effort high
+  forecast_effort: high
+  postmortems_per_day: 2      # Claude investigates its biggest misses and writes a lesson for next time
+
+forecast:
+  # Price forecasts for every stock in the app (1 day to 1 year), graded in the open on Records → Forecasts.
+  enabled: true
+  paths: 2000                 # simulated price paths per stock
+  ledger_max: 250             # stocks whose forecasts are written to the report card each day (watchlist first)
+  equity_premium: 0.05        # expected return above cash per unit of beta (an assumption, not a prediction)
+  risk_free: 0.04             # used when FRED isn't connected (otherwise the fed funds rate)
+  backtest: true              # re-run the model on past dates so accuracy (and calibration) start on day one
+  backtest_stocks: 150
+  # macro_events: [{date: "2027-01-08", kind: cpi}]   # extra Fed (fomc) / CPI dates beyond the built-in calendar
+
+valuation:
+  # Cheap or expensive versus companies with similar growth, margins and industry (SEC financial data).
+  per_run: 150                # companies fetched from the SEC per half-hour run (each needs 2 requests)
+  discount_rate: 0.09         # for the reverse DCF ("growth the price assumes")
+  terminal_growth: 0.03
+
+news:
+  gdelt: true                 # headlines from the GDELT Project (free; cite and link back)
+  per_run: 12                 # GDELT asks for at most one request every 5 seconds
+  max_tickers: 300
+  # Massive (ex-Polygon) news isn't used: its free/individual plans are a personal, non-display licence and this
+  # app's site is public. (The setting is kept for a future licensed option; it does nothing today.)
+  massive: false
+
+bubble:
+  # The AI basket: drives the AI bubble gauge and each stock's AI exposure. Edit freely; unknown tickers are skipped.
+  core: [NVDA, AMD, AVGO, TSM, MU, ARM, MRVL, SMCI, ASML, AMAT, LRCX, KLAC, ALAB, CRWV, NBIS, PLTR, AI, SOUN, COHR]
+  platform: [MSFT, GOOGL, AMZN, META, ORCL, CRM, NOW, SNOW, ADBE, IBM]
+  power: [VRT, ANET, CEG, VST, TLN, ETN, GEV, DELL, HPE, CLS, EQIX, DLR, PWR, NRG, OKLO]
+
+conviction:
+  # "Top conviction" needs every check (see the stock page); these are the thresholds.
+  min_claude_p: 0.58          # Claude's chance of beating the S&P 500 over ~3 months
+  min_edge_vs_base: 0.08      # ...and this far above the measured base rate
+  min_adv_usd: 5000000        # trades at least this much a day
+
+selfcheck:
+  alert_on_fail: true         # push a notice when the self-check finds a new failure (at most every 6 hours)
+
+etf:
+  # Daily trades of transparent active ETFs, from the holdings files the funds themselves must post every trading
+  # day (SEC Rule 6c-11). Default: ARK's six active funds. The files are checked every 2 hours (they change once
+  # a day) and only the day-over-day changes are published, with a link to the fund's file. If a fund's file
+  # moves, paste the "Full Holdings CSV" link from its page as `url`.
+  enabled: true
+  funds:
+    - {ticker: ARKK}
+    - {ticker: ARKW}
+    - {ticker: ARKG}
+    - {ticker: ARKQ}
+    - {ticker: ARKF}
+    - {ticker: ARKX}
+  # - {ticker: XYZ, name: "Some Active ETF", manager: "Manager name", url: "https://.../holdings.csv"}
+
+insiders:
+  min_value_usd: 0            # ignore tiny trades below this $ value in the feed (0 = keep all)
+  show_non_discretionary: true  # option exercises, tax withholding, grants, gifts (shown, scored as noise)
+
+congress:
+  house: true
+  senate: true
+  # Party leaders (Speaker, floor leaders, whips, caucus/conference chairs) are detected automatically from the
+  # @unitedstates congress-legislators data, refreshed daily. Add anyone else by Bioguide ID (bioguide.congress.gov):
+  leadership_extra: []
+
+etoro:
+  # OFF by default: eToro says its API connectors aren't currently offered to US clients, and its terms allow
+  # personal use only — this app's website is public, so enabling it republishes other investors' positions.
+  enabled: false
+  period: "AbsOneYear"        # ranking window
+  top_n: 20                   # how many top investors to follow
+  max_risk_score: 6           # eToro risk score 1-10; 6 or lower filters out the gamblers
+  min_trades: 30              # need enough closed trades for a win rate to mean anything
+  min_copiers: 100
+
+funds:
+  # Concentrated, long-term managers copy best (see docs/DATA_SOURCES.md §8).
+  # Every CIK is checked against the SEC's own name each run; mismatches are skipped and reported.
+  top_positions_for_backtest: 50
+  list:
+    - {cik: "0001067983", name: "Berkshire Hathaway", manager: "Greg Abel / Warren Buffett", style: "concentrated", expect: "BERKSHIRE HATHAWAY"}
+    # Pershing Square now files its 13F under this CIK (the old 0001336528 files only a 13F-NT pointing here)
+    - {cik: "0002026053", name: "Pershing Square", manager: "Bill Ackman", style: "concentrated", expect: "PERSHING SQUARE"}
+    # (Scion Asset Management / Michael Burry deregistered in Nov 2025 — no more 13Fs)
+    - {cik: "0001656456", name: "Appaloosa", manager: "David Tepper", style: "concentrated", expect: "APPALOOSA"}
+    - {cik: "0001061768", name: "Baupost Group", manager: "Seth Klarman", style: "value", expect: "BAUPOST"}
+    # Greenlight's 13F is filed by DME Capital Management since 2024
+    - {cik: "0001489933", name: "Greenlight (DME Capital)", manager: "David Einhorn", style: "value", expect: "DME CAPITAL"}
+    - {cik: "0001040273", name: "Third Point", manager: "Dan Loeb", style: "activist", expect: "THIRD POINT"}
+    - {cik: "0001536411", name: "Duquesne Family Office", manager: "Stanley Druckenmiller", style: "macro", expect: "DUQUESNE"}
+    - {cik: "0001709323", name: "Himalaya Capital", manager: "Li Lu", style: "concentrated", expect: "HIMALAYA"}
+    - {cik: "0001112520", name: "Akre Capital", manager: "Akre / Neff / Saler", style: "concentrated", expect: "AKRE"}
+    - {cik: "0001061165", name: "Lone Pine Capital", manager: "Stephen Mandel", style: "growth", expect: "LONE PINE"}
+    - {cik: "0001103804", name: "Viking Global", manager: "Andreas Halvorsen", style: "growth", expect: "VIKING"}
+    - {cik: "0001167483", name: "Tiger Global", manager: "Chase Coleman", style: "growth", expect: "TIGER GLOBAL"}
+    - {cik: "0001135730", name: "Coatue", manager: "Philippe Laffont", style: "growth", expect: "COATUE"}
+    - {cik: "0000921669", name: "Carl Icahn", manager: "Carl Icahn", style: "activist", expect: "ICAHN"}
+    - {cik: "0001029160", name: "Soros Fund Management", manager: "Soros family office", style: "macro", expect: "SOROS"}
+    - {cik: "0001791786", name: "Elliott Investment Mgmt", manager: "Paul Singer", style: "activist", expect: "ELLIOTT"}
+    - {cik: "0001345471", name: "Trian Fund Management", manager: "Nelson Peltz", style: "activist", expect: "TRIAN"}
+    - {cik: "0001418814", name: "ValueAct", manager: "Mason Morfit", style: "activist", expect: "VALUEACT"}
+    - {cik: "0001549575", name: "Dalal Street (Pabrai)", manager: "Mohnish Pabrai", style: "concentrated", expect: "DALAL STREET"}
+    - {cik: "0001056831", name: "Fairholme Capital", manager: "Bruce Berkowitz", style: "concentrated", expect: "FAIRHOLME"}
+    - {cik: "0001541617", name: "Altimeter Capital", manager: "Brad Gerstner", style: "growth", expect: "ALTIMETER"}
+    - {cik: "0001747057", name: "D1 Capital Partners", manager: "Dan Sundheim", style: "growth", expect: "D1 CAPITAL"}
+    - {cik: "0001697748", name: "ARK Investment Mgmt", manager: "Cathie Wood", style: "high-turnover", expect: "ARK INVESTMENT"}
+    - {cik: "0001096343", name: "Markel Group", manager: "Tom Gayner", style: "value", expect: "MARKEL"}
+    - {cik: "0001517137", name: "Starboard Value", manager: "Jeff Smith", style: "activist", expect: "STARBOARD"}
+    - {cik: "0001350694", name: "Bridgewater Associates", manager: "Bridgewater", style: "diversified", expect: "BRIDGEWATER"}
+
+refresh:
+  # Minutes between runs of each job. The GitHub schedule fires every 5 minutes (best effort).
+  insiders_live: 5
+  sale_notices: 10            # Form 144 notices of planned insider sales
+  activists_live: 5
+  etf_daily: 120              # the funds' daily holdings files (new once a day)
+  short_volume: 180           # FINRA's daily short-sale volume file (posted by 6pm ET)
+  etoro: 15
+  congress_house: 30
+  congress_senate: 60
+  funds: 360                  # every 6h normally …
+  funds_deadline_window: 30   # … every 30 min during 13F deadline weeks
+  prices_market_hours: 15
+  prices_off_hours: 120
+  daily_backstop: 1440        # yesterday's SEC daily index (catches anything missed)
+  splits: 720                 # stock splits → keeps the stored price history on one basis
+  track_records: 1440         # daily rebuild of win rates (cheap once caches are warm)
+  fundamentals: 1440
+  companies: 30               # SEC company financials (per_run at a time)
+  filings_live: 10            # new 8-Ks from the EDGAR live feed
+  headlines: 60
+  forecasts: 30               # rebuilt only after a new daily close
+  forecast_grading: 360
+  backtest: 1440
+  run_budget_minutes: 9       # stop starting new jobs after this long (keeps runs from piling up)

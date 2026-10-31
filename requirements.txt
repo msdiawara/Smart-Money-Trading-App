@@ -1,0 +1,13 @@
+# Exact versions the test suite passed with (Python 3.13). Bump deliberately, then re-run the tests.
+requests==2.34.2
+PyYAML==6.0.3
+numpy==2.5.3
+pdfplumber==0.11.10
+pdfminer.six==20260107
+pypdfium2==5.13.0
+pillow==12.3.0
+# predictability model (logistic regression + gradient boosting comparison)
+scikit-learn==1.9.1
+scipy==1.18.1
+joblib==1.6.0
+threadpoolctl==3.7.0
