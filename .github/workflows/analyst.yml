@@ -1,0 +1,99 @@
+name: Claude analyst
+
+# Runs Claude on the strongest new signals, a few idea write-ups a day and the morning market brief.
+# Separate from the 5-minute data refresh because deep analyses can take minutes each. It reads the latest
+# pipeline memory (read-only) and saves its results to its own cache; the next refresh shows them in the app.
+on:
+  schedule:
+    - cron: "11-59/20 * * * *"    # every 20 minutes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read          # to tell "no analyst memory yet" from "memory exists but didn't restore"
+
+concurrency:
+  group: smart-money-radar-analyst
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Is an Anthropic API key set?
+        id: key
+        env:
+          K: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$K" ]; then echo "has=1" >> "$GITHUB_OUTPUT"; else echo "No ANTHROPIC_API_KEY secret: nothing to do."; fi
+
+      - uses: actions/checkout@v6
+        if: steps.key.outputs.has == '1'
+
+      - uses: actions/setup-python@v6
+        if: steps.key.outputs.has == '1'
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+        if: steps.key.outputs.has == '1'
+
+      - name: Restore pipeline memory (read-only)
+        if: steps.key.outputs.has == '1'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .cache/*
+            !.cache/heavy
+            !.cache/ai
+          key: smr-state-readonly-${{ github.run_id }}
+          restore-keys: smr-state-
+
+      - name: Restore analyst memory
+        id: ai_cache
+        if: steps.key.outputs.has == '1'
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/ai
+          key: smr-ai-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: smr-ai-
+
+      # The analyst memory holds today's spend. Starting without it would reset the daily budget and redo work,
+      # so if a saved copy exists but didn't restore (a cache hiccup), skip this run instead of starting fresh.
+      - name: Don't start from scratch by accident
+        id: guard
+        if: steps.key.outputs.has == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MATCHED: ${{ steps.ai_cache.outputs.cache-matched-key }}
+        run: |
+          if [ -n "$MATCHED" ]; then echo "go=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          n=$(gh cache list --repo "$GITHUB_REPOSITORY" --key smr-ai- --limit 1 --json key --jq 'length' 2>/dev/null || echo "unknown")
+          if [ "$n" = "0" ]; then
+            echo "No analyst memory yet: first run."; echo "go=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Analyst memory exists but could not be restored ($n); skipping this run so the daily budget isn't reset."
+          fi
+
+      - name: Run Claude analyst
+        id: analyst
+        if: steps.guard.outputs.go == '1'
+        timeout-minutes: 20
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m pipeline.analyst_main
+
+      - name: Check whether anything changed
+        id: check
+        if: always() && steps.analyst.outcome != 'skipped'
+        run: |
+          if [ -f .cache/ai/.changed ]; then rm .cache/ai/.changed; echo "save=1" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Save analyst memory
+        if: always() && steps.check.outputs.save == '1'
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/ai
+          key: smr-ai-${{ github.run_id }}-${{ github.run_attempt }}
