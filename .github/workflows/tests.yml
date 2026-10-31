@@ -1,0 +1,23 @@
+name: Tests
+on:
+  push:
+    paths: ["pipeline/**", "tests/**", "web/**", "requirements.txt", ".github/workflows/tests.yml"]
+  schedule:
+    - cron: "17 9 * * *"          # nightly, so the app's self-check always has a recent result to report
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt pytest==9.1.1 reportlab==5.0.1
+      - run: python -m pytest -q
+      - name: Check the app's scripts parse
+        run: for f in web/*.js; do node --check "$f"; done
