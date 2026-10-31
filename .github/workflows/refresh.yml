@@ -1,99 +1,199 @@
-name: Claude analyst
+name: Refresh data & publish app
 
-# Runs Claude on the strongest new signals, a few idea write-ups a day and the morning market brief.
-# Separate from the 5-minute data refresh because deep analyses can take minutes each. It reads the latest
-# pipeline memory (read-only) and saves its results to its own cache; the next refresh shows them in the app.
 on:
   schedule:
-    - cron: "11-59/20 * * * *"    # every 20 minutes
+    - cron: "3-58/5 * * * *"      # every 5 minutes (GitHub's minimum), offset from the busy top of the hour
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Jobs to run now regardless of schedule (comma-separated, or 'all')"
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [refresh]              # optional: an external cron service can trigger this for steadier timing
+  push:
+    branches: [main]
+    paths: ["web/**", "pipeline/**", "config/**", "requirements.txt", ".github/workflows/refresh.yml"]
 
+# The job that parses outside data gets a read-only token; publishing rights live in a separate deploy job that
+# runs no third-party code or input: it builds the site from a clean checkout plus the first job's JSON files.
 permissions:
   contents: read
-  actions: read          # to tell "no analyst memory yet" from "memory exists but didn't restore"
+  actions: read                   # lets the safety check below see whether saved state exists
 
 concurrency:
-  group: smart-money-radar-analyst
-  cancel-in-progress: false
+  group: smart-money-radar
+  cancel-in-progress: false       # never run two refreshes at once; a late run waits its turn
 
+# Every action below is a Node 24 major: GitHub removed Node 20 from its runners on 16 Sep 2026.
 jobs:
-  analyze:
+  refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 16
     steps:
-      - name: Is an Anthropic API key set?
-        id: key
-        env:
-          K: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$K" ]; then echo "has=1" >> "$GITHUB_OUTPUT"; else echo "No ANTHROPIC_API_KEY secret: nothing to do."; fi
-
       - uses: actions/checkout@v6
-        if: steps.key.outputs.has == '1'
 
       - uses: actions/setup-python@v6
-        if: steps.key.outputs.has == '1'
         with:
           python-version: "3.13"
           cache: pip
 
       - run: pip install -r requirements.txt
-        if: steps.key.outputs.has == '1'
 
-      - name: Restore pipeline memory (read-only)
-        if: steps.key.outputs.has == '1'
+      # Small, fast-changing memory (what's been seen, alerts sent, latest prices). `.cache/*` + the exclusions
+      # keep the large folder and the analyst's folder out of this archive; the same path list must be used to
+      # restore and to save (and by the analyst workflow, which reads it).
+      - name: Restore pipeline memory (small)
+        id: restore_small
         uses: actions/cache/restore@v5
         with:
           path: |
             .cache/*
             !.cache/heavy
             !.cache/ai
-          key: smr-state-readonly-${{ github.run_id }}
+          key: smr-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: smr-state-
 
-      - name: Restore analyst memory
-        id: ai_cache
-        if: steps.key.outputs.has == '1'
+      - name: Restore price history & filings cache (large)
+        id: restore_heavy
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/heavy
+          key: smr-heavy-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: smr-heavy-
+
+      - name: Restore Claude analyst results (read-only; the analyst workflow writes them)
         uses: actions/cache/restore@v5
         with:
           path: .cache/ai
           key: smr-ai-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: smr-ai-
 
-      # The analyst memory holds today's spend. Starting without it would reset the daily budget and redo work,
-      # so if a saved copy exists but didn't restore (a cache hiccup), skip this run instead of starting fresh.
+      # Both caches: if one exists but didn't restore, stop rather than overwrite it with a fresh, empty one
+      # (the large one holds the price history and the forecast record that accuracy is measured from).
       - name: Don't start from scratch by accident
-        id: guard
-        if: steps.key.outputs.has == '1'
+        if: steps.restore_small.outputs.cache-matched-key == '' || steps.restore_heavy.outputs.cache-matched-key == ''
         env:
           GH_TOKEN: ${{ github.token }}
-          MATCHED: ${{ steps.ai_cache.outputs.cache-matched-key }}
+          SMALL_HIT: ${{ steps.restore_small.outputs.cache-matched-key }}
+          HEAVY_HIT: ${{ steps.restore_heavy.outputs.cache-matched-key }}
         run: |
-          if [ -n "$MATCHED" ]; then echo "go=1" >> "$GITHUB_OUTPUT"; exit 0; fi
-          n=$(gh cache list --repo "$GITHUB_REPOSITORY" --key smr-ai- --limit 1 --json key --jq 'length' 2>/dev/null || echo "unknown")
-          if [ "$n" = "0" ]; then
-            echo "No analyst memory yet: first run."; echo "go=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Analyst memory exists but could not be restored ($n); skipping this run so the daily budget isn't reset."
-          fi
+          check() {   # $1 = key prefix, $2 = what restored (empty = nothing)
+            [ -n "$2" ] && return 0
+            n=$(gh cache list --repo "$GITHUB_REPOSITORY" --key "$1" --limit 1 --json key --jq length 2>/dev/null || echo unknown)
+            if [ "$n" = "unknown" ]; then
+              echo "::error::Couldn't check whether saved $1 data exists (cache service problem?). Skipping this run to be safe."
+              exit 1
+            fi
+            if [ "$n" != "0" ]; then
+              echo "::error::Saved $1 data exists but couldn't be restored. Skipping this run so it isn't overwritten."
+              exit 1
+            fi
+            echo "No saved $1 data yet: starting fresh."
+          }
+          check smr-state- "$SMALL_HIT"
+          check smr-heavy- "$HEAVY_HIT"
 
-      - name: Run Claude analyst
-        id: analyst
-        if: steps.guard.outputs.go == '1'
-        timeout-minutes: 20
+      - name: Run pipeline
+        id: pipeline
+        timeout-minutes: 12         # leaves time to save state even if a source hangs
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python -m pipeline.analyst_main
+          SEC_CONTACT_EMAIL: ${{ secrets.SEC_CONTACT_EMAIL }}
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          OPENFIGI_API_KEY: ${{ secrets.OPENFIGI_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # the refresh never calls Claude; it only needs to know a key exists (for the Data tab)
+          HAS_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          QUIVER_API_KEY: ${{ secrets.QUIVER_API_KEY }}
+          ETORO_API_KEY: ${{ secrets.ETORO_API_KEY }}
+          ETORO_USER_KEY: ${{ secrets.ETORO_USER_KEY }}
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          FORCE_JOBS: ${{ inputs.force }}
+          # read-only token, used only by the self-check to see whether the test workflow last passed
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m pipeline.main --force "$FORCE_JOBS"
 
-      - name: Check whether anything changed
+      # Saved whenever the pipeline actually started (it checkpoints after every job), never after the
+      # safety check above stopped the run.
+      - name: Check what needs saving
         id: check
-        if: always() && steps.analyst.outcome != 'skipped'
+        if: always() && steps.pipeline.outcome != 'skipped'
         run: |
-          if [ -f .cache/ai/.changed ]; then rm .cache/ai/.changed; echo "save=1" >> "$GITHUB_OUTPUT"; fi
+          if [ -f .cache/state.json.gz ]; then echo "small=1" >> "$GITHUB_OUTPUT"; fi
+          if [ -f .cache/heavy/.dirty ]; then rm .cache/heavy/.dirty; echo "heavy=1" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Save analyst memory
-        if: always() && steps.check.outputs.save == '1'
+      - name: Save pipeline memory
+        if: always() && steps.check.outputs.small == '1'
         uses: actions/cache/save@v5
         with:
-          path: .cache/ai
-          key: smr-ai-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .cache/*
+            !.cache/heavy
+            !.cache/ai
+          key: smr-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save price history & filings cache
+        if: always() && steps.check.outputs.heavy == '1'
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/heavy
+          key: smr-heavy-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Only data leaves this job: the JSON files the pipeline wrote. The app itself is taken from a clean
+      # checkout in the deploy job, so nothing in this job (which reads outside data) can alter the app's code.
+      - name: Collect the data files
+        run: |
+          rm -rf _data && mkdir -p _data
+          (cd web/data && find . -type f -name '*.json' -exec cp --parents {} ../../_data/ \;)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site-data
+          path: _data
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    needs: refresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: site-data
+          path: _data
+
+      # The site = the app files exactly as committed + the pipeline's data files (regular .json files only).
+      - name: Assemble the site
+        run: |
+          rm -rf _site && mkdir -p _site
+          git archive HEAD web | tar -x -C _site --strip-components=1
+          mkdir -p _site/data
+          (cd _data && find . -type f -name '*.json' -exec cp --parents {} ../_site/data/ \;)
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - uses: actions/configure-pages@v6
+      - id: deploy
+        uses: actions/deploy-pages@v5
