@@ -6,7 +6,7 @@ import math
 import numpy as np
 import pytest
 
-from pipeline import fledger, learn
+from pipeline import fledger, learn, ml
 from pipeline import forecast as F
 
 
@@ -200,14 +200,34 @@ def test_calibration_learns_to_widen_too_narrow_ranges():
     c = cal["1m"]
     assert c["status"] == "applied"
     assert c["cov80_raw"] < 0.72
-    assert 1.2 < c["scale"] < 1.45 and 0.73 < c["cov80_holdout"] < 0.85 and c["cov80_holdout_raw"] < 0.74
+    # widened part of the way (evidence: ~10 independent months), and better on the newest days it wasn't fitted on
+    assert 1.15 < c["scale"] < 1.45 and c["cov80_holdout"] > c["cov80_holdout_raw"] and c["holdout_gain"] > 0
     assert cal["1y"]["status"] == "learning" and cal["1y"]["scale"] == 1.0
+    # more independent periods of the same evidence → a fuller correction
+    more = learn.calibration({"graded": {"quant": {"21": _rows(6000, 0.07, 0.05, seed=1, dates=900)}}},
+                             window_days=1800)["1m"]
+    assert more["periods"] > c["periods"] and more["scale"] > c["scale"]
 
 
 def test_calibration_learns_to_narrow_and_unbias():
     L = {"graded": {"quant": {"21": _rows(3000, 0.04, 0.06, seed=2, bias=0.01)}}}
     c = learn.calibration(L)["1m"]
-    assert c["scale"] < 0.85 and c["shift"] > 0.004
+    # the median nudge is trusted more slowly than the stretch (a past market move is weak evidence of bias)
+    assert c["scale"] < 0.9 and 0.001 < c["shift"] < 0.006
+
+
+def test_calibration_that_would_hurt_the_newest_forecasts_is_held_back():
+    rng = np.random.default_rng(11)
+    base = dt.date(2025, 1, 1)
+    rows = []
+    for i in range(4000):
+        d = i % 400
+        sig = 0.04 if d < 280 else 0.065           # calm, then (the newest 30%) back to what the model expected
+        er = float(rng.normal(0, sig))
+        rows.append({"made": (base + dt.timedelta(days=d)).isoformat(), "er": er, "w10": 1.2816 * 0.065,
+                     "w90": 1.2816 * 0.065, "in80r": int(abs(er) <= 1.2816 * 0.065)})
+    c = learn.calibration({"graded": {"quant": {"21": rows}}}, window_days=400)["1m"]
+    assert c["status"] == "held" and c["scale"] == 1.0 and c["fitted"]["scale"] < 1.0 and c["holdout_gain"] < 0
 
 
 def test_calibration_waits_for_enough_independent_days():
@@ -215,32 +235,73 @@ def test_calibration_waits_for_enough_independent_days():
     assert learn.calibration(L)["1m"]["status"] == "learning"
 
 
-def _tilt_rows(n, effect, seed, n_dates=250):
+def _tilt_rows(n, effect, seed, n_dates=250, market=0.05, src_feats=None, kind="linear"):
+    """Graded 1-month rows with version-3 features; `effect` plants a relation (linear in the signal score, or a
+    nonlinear one: last month's move matters only for volatile stocks)."""
     rng = np.random.default_rng(seed)
     base = dt.date(2025, 1, 1)
-    rows = []
+    rows, mkt = [], {}
+    keys = src_feats or ml.FEATS
     for i in range(n):
-        f = {k: float(rng.normal()) for k in learn.FEATS}
-        er = effect * f["sig"] + float(rng.normal(0, 0.08))
-        rows.append({"made": (base + dt.timedelta(days=int(i * n_dates / n) * 2)).isoformat(), "f": f, "er": er})
+        made = (base + dt.timedelta(days=int(i * n_dates / n) * 2)).isoformat()
+        m = mkt.setdefault(made, float(rng.normal(0, market)))      # every stock shares the market's move that day
+        f = {k: float(rng.normal()) for k in keys}
+        f["v"] = ml.FEAT_V
+        if kind == "linear":
+            e = effect * f.get("sig", f.get("rev", 0.0))
+        else:
+            e = effect * f["rev"] * (f["lvol"] > 0.3) + effect * 0.6 * (f["hi52"] < -0.8)
+        rows.append({"t": f"T{i % 40}", "made": made, "f": f, "er": m + e + float(rng.normal(0, 0.08))})
     return rows
 
 
-def test_tilt_learning_finds_a_planted_signal():
+def test_competition_accepts_a_planted_signal_and_nudges_the_right_way():
     L = {"graded": {"quant": {"21": _tilt_rows(2500, 0.03, seed=5)}}}
     tw = learn.tilt_weights(L)
-    assert tw["accepted"], tw
-    w = tw["weights"]
-    assert w["sig"] > 0.01 and all(abs(w[k]) < w["sig"] / 3 for k in learn.FEATS if k != "sig")
-    ret, parts, days = learn.tilt_for(tw, {"sig": 2.0})
-    assert ret > 0 and parts[0]["k"] == "sig" and days == 21
+    assert tw["accepted"], tw["status"]
+    assert tw["model"] in ml.CANDIDATES and set(tw["candidates"]) == set(ml.CANDIDATES)
+    sm = ml.SignalModel.build({**tw, "on": True}, L)
+    hi, parts, days = sm.tilt({"sig": 2.0, "v": ml.FEAT_V})
+    lo = sm.tilt({"sig": -2.0, "v": ml.FEAT_V})[0]
+    assert hi > lo and hi > 0 and days == 21 and parts and parts[0]["k"] == "sig"
+    assert abs(hi) <= tw["cap"] + 1e-9
 
 
-def test_tilt_learning_rejects_pure_noise():
+def test_competition_rejects_pure_noise():
     accepted = sum(learn.tilt_weights({"graded": {"quant": {"21": _tilt_rows(2500, 0.0, seed=s)}}})["accepted"]
-                   for s in range(10, 30))
-    assert accepted <= 1
-    assert learn.tilt_for({"accepted": False}, {"sig": 1}) == (0.0, [], 21)
+                   for s in range(10, 16))
+    assert accepted == 0
+    assert ml.SignalModel.build({"accepted": False}, {"graded": {}}) is None
+
+
+def test_competition_picks_trees_when_the_signal_is_nonlinear_and_ridge_when_it_is_linear():
+    price = [k for k in ml.PRICE_FEATS]
+    nonlin = learn.tilt_weights({"graded": {"quant_bt": {"21": _tilt_rows(6000, 0.04, seed=21, n_dates=420,
+                                                                          src_feats=price, kind="nonlinear")}}})
+    assert nonlin["accepted"] and nonlin["candidates"]["trees"]["gain"] > nonlin["candidates"]["ridge"]["gain"] + 0.005
+    assert nonlin["model"] in ("trees", "average", "neural_net") and nonlin["model"] != "ridge"
+    lin = learn.tilt_weights({"graded": {"quant_bt": {"21": _tilt_rows(6000, 0.02, seed=22, n_dates=420,
+                                                                       src_feats=price)}}})
+    assert lin["accepted"] and lin["candidates"]["ridge"]["gain"] >= lin["candidates"]["trees"]["gain"] - 0.002
+
+
+def test_learner_starts_from_the_backtest_on_day_one():
+    bt = _tilt_rows(3000, 0.0, seed=8, src_feats=ml.PRICE_FEATS)
+    for r in bt:                                  # a real effect of last month's move, in the backtest only
+        r["er"] += -0.02 * r["f"]["rev"]
+    tw = learn.tilt_weights({"graded": {"quant_bt": {"21": bt}}})
+    assert tw["accepted"] and tw["n_live"] == 0
+    sm = ml.SignalModel.build({**tw, "on": True}, {"graded": {"quant_bt": {"21": bt}}})
+    assert sm.tilt({"rev": -1.5, "sig": 2.0, "v": ml.FEAT_V})[0] > sm.tilt({"rev": 1.5, "v": ml.FEAT_V})[0]
+
+
+def test_learner_ignores_rows_and_states_from_older_feature_definitions():
+    old = _tilt_rows(2500, 0.03, seed=5)
+    for r in old:
+        r["f"]["v"] = 2
+    assert learn.tilt_weights({"graded": {"quant": {"21": old}}})["n"] == 0
+    stale = {"accepted": True, "on": True, "model": "ridge", "fv": 2}
+    assert ml.SignalModel.build(stale, {"graded": {"quant": {"21": _tilt_rows(2500, 0.03, seed=5)}}}) is None
 
 
 def _pair_rows(n, qs_c, qs_m, days=120):
@@ -252,19 +313,31 @@ def _pair_rows(n, qs_c, qs_m, days=120):
 def test_blend_weights_follow_skill_on_the_same_forecasts():
     L = {"graded": {"claude": {"21": _pair_rows(400, 0.85, 0.95)}}}       # Claude 15% better than naive, model 5%
     w = learn.blend_weights(L)["1m"]
-    assert 0.6 < w["w_claude"] <= 0.8 and w["days"] == 120
-    L = {"graded": {"claude": {"21": _pair_rows(400, 1.1, 0.95)}}}
-    assert learn.blend_weights(L)["1m"]["w_claude"] < 0.3
+    assert 0.52 < w["w_claude"] < 0.62 and w["days"] == 120 and w["periods"] <= 5   # four months: modest evidence
+    L = {"graded": {"claude": {"21": _pair_rows(1200, 0.85, 0.95, days=600)}}}
+    assert learn.blend_weights(L)["1m"]["w_claude"] > 0.6                          # twenty months: trusted more
+    L = {"graded": {"claude": {"21": _pair_rows(1200, 1.1, 0.95, days=600)}}}
+    assert learn.blend_weights(L)["1m"]["w_claude"] < 0.4
     assert learn.blend_weights({"graded": {}})["1m"]["w_claude"] == 0.5
 
 
 def test_features_recorded_with_forecasts():
     evs = [{"score": 80, "direction": "bullish", "kind": "insider", "action": "buy", "signal": "strong"},
            {"score": 30, "direction": "bearish", "kind": "insider", "action": "sell", "signal": "weak"}]
-    c = list(np.linspace(50, 100, 300))
-    f = learn.features(evs, {}, {"rich_pctl": 80}, {"score": 5}, "favorable", c)
+    rng = np.random.default_rng(3)
+    c = list(50 * np.exp(np.cumsum(rng.normal(0.002, 0.02, 300))))
+    b = list(100 * np.exp(np.cumsum(rng.normal(0.0, 0.01, 300))))
+    v = [1e6] * 300
+    f = learn.features(evs, {}, {"rich_pctl": 80}, {"score": 5}, "favorable", c, b, v)
     assert f["sig"] == pytest.approx(0.5) and f["claude"] == 1.0 and f["ins"] == 0.0
-    assert f["val"] == pytest.approx(0.3) and f["bub"] == 0.5 and f["mom"] > 0
+    assert f["val"] == pytest.approx(0.3) and f["bub"] == 0.5 and f["v"] == learn.FEAT_V
+    assert set(ml.PRICE_FEATS) <= set(f) and f["hi52"] <= 0 and f["vol_rel"] > 0 and -1 <= f["beta"] <= 4
+    assert f["liq"] == pytest.approx(math.log10(float(np.median(np.asarray(c[-21:]) * 1e6))))
+    # returns are measured against the S&P 500 over the same days: a stock that only kept pace has none
+    same = learn.features([], {}, None, None, None, c, c)
+    assert same["mom"] == pytest.approx(0.0) and same["rev"] == pytest.approx(0.0) and same["vol_rel"] == pytest.approx(0.0)
+    assert "mom" not in learn.features([], {}, None, None, None, c)        # no benchmark: no price features
+    assert "liq" not in same                                                # no volumes: no liquidity
 
 
 class _Matrix:
@@ -288,7 +361,7 @@ def test_backtest_job_grades_past_forecasts_and_seeds_calibration(tmp_path, monk
     panel = quant.Panel(_Matrix(cols, dates))
     heavy = tmp_path / "heavy"
     heavy.mkdir()
-    cfg = {"forecast": {"backtest_stocks": 12, "backtest_anchors": 12, "backtest_paths": 300, "backtest_seconds_per_run": 600}}
+    cfg = {"forecast": {"backtest_stocks": 12, "backtest_anchors": 20, "backtest_paths": 300, "backtest_seconds_per_run": 600}}
     settings = SimpleNamespace(c=lambda *k, default=None: cfg.get(k[0], default) if len(k) == 1 else default,
                                mark_heavy_dirty=lambda: None)
     budget = SimpleNamespace(left=lambda: 1000)
@@ -301,5 +374,19 @@ def test_backtest_job_grades_past_forecasts_and_seeds_calibration(tmp_path, monk
     # running again adds nothing new (same stock-dates)
     n2, _ = insight.job_backtest(settings, {}, panel, budget, heavy)
     assert n2 == 0
+    # the grid is one anchor a week, on the calendar: next month's grid skips every stock-date already graded
+    bt = fledger.load(heavy)["bt"]
+    weeks = [dt.date.fromordinal(int(d)).isocalendar()[:2] for d in bt["anchors"]]
+    assert len(set(weeks)) == len(weeks) == 20
+    L2 = fledger.load(heavy)
+    L2["bt"]["built"] = "2026-09"
+    fledger.save(heavy, L2)
+    n3, _ = insight.job_backtest(settings, {}, panel, budget, heavy)
+    assert n3 == 0 and fledger.load(heavy)["bt"]["n_names"] == 0
     cal = learn.calibration(L, min_n=100, min_dates=10)
-    assert cal["1m"]["status"] == "applied" and cal["1m"]["from"] == "backtest"
+    assert cal["1m"]["status"] in ("applied", "held") and cal["1m"]["from"] == "backtest"
+    # every backtest horizon carries the features both learners use from day one, with its own earnings flag
+    for h in ("1", "5", "21", "63"):
+        rows = L["graded"]["quant_bt"][h]
+        assert rows and all(r["f"]["v"] == learn.FEAT_V and "rev" in r["f"] and "ein" in r["f"] for r in rows if "f" in r)
+        assert sum("f" in r for r in rows) >= 0.8 * len(rows)

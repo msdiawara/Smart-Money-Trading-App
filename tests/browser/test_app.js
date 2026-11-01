@@ -111,6 +111,46 @@ const assert = require("assert");
   assert(st.includes("On this phone") && st.includes("On the server"), "self-check sections");
   for (const h of ["#/ideas", "#/watch", "#/ask", "#/size"]) { await page.goto(base + h); await page.waitForTimeout(500); await noOverflow(h); }
 
+  // 5b. All forecasts: every stock listed; typing with a phone keyboard that composes words keeps the box intact;
+  // Back from a stock and a refresh both keep the reader's place in the list
+  await page.goto(base + "#/forecasts"); await page.waitForTimeout(900);
+  const nRows = await page.$$eval("#fc-rows a.fc-row", (a) => a.length);
+  const idx = await page.evaluate(() => fetch("data/forecasts.json").then((r) => r.json()));
+  assert(nRows > 0 && nRows === Math.min(150, idx.stocks.length), `every stock listed (${nRows} of ${idx.stocks.length})`);
+  const line = await page.innerText("#fc-rows a.fc-row .grow > div.small.muted");
+  assert(/\d+% chance it rises/.test(line) && !/\+\d+% chance/.test(line), "chance shown as a chance, not a price move: " + line);
+  await noOverflow("#/forecasts");
+  await page.$eval("#fc-q", (q) => { q.dataset.mark = "same"; });
+  await page.focus("#fc-q");
+  const cdp = await ctx.newCDPSession(page);
+  for (const part of ["n", "nv", "nvi", "nvid", "nvidi", "nvidia"]) {
+    await cdp.send("Input.imeSetComposition", { text: part, selectionStart: part.length, selectionEnd: part.length });
+    await page.waitForTimeout(60);
+  }
+  await cdp.send("Input.insertText", { text: "nvidia" });
+  await page.waitForTimeout(500);
+  assert.strictEqual(await page.$eval("#fc-q", (q) => q.value + "|" + q.dataset.mark), "nvidia|same", "the search box isn't replaced while typing");
+  const found = await page.$$eval("#fc-rows a.fc-row b", (b) => b.map((x) => x.textContent));
+  assert(found.length >= 1 && found.includes("NVDA"), "search finds by company name: " + JSON.stringify(found));
+  await page.fill("#fc-q", ""); await page.waitForTimeout(400);
+  const tall = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
+  if (tall > 300) {
+    await page.evaluate(() => window.scrollTo(0, 300)); await page.waitForTimeout(150);
+    const y0 = await page.evaluate(() => window.scrollY);
+    const link = await page.evaluateHandle(() => [...document.querySelectorAll("#fc-rows a.fc-row")].find((a) => a.getBoundingClientRect().top > 80));
+    await link.click(); await page.waitForTimeout(900);
+    assert(/#\/ticker\//.test(await page.evaluate(() => location.hash)), "a row opens its stock");
+    await page.goBack(); await page.waitForTimeout(700);
+    const y1 = await page.evaluate(() => window.scrollY);
+    assert(Math.abs(y1 - y0) < 5, `Back returns to the same place in the list (${y1} vs ${y0})`);
+    await page.click("#refresh"); await page.waitForTimeout(1200);
+    const y2 = await page.evaluate(() => window.scrollY);
+    assert(Math.abs(y2 - y0) < 5, `a refresh keeps the place too (${y2} vs ${y0})`);
+  } else console.log("list too short to test scrolling:", tall);
+  await page.evaluate(() => { location.hash = "#/ideas"; }); await page.waitForTimeout(500);
+  await page.evaluate(() => { location.hash = "#/forecasts"; }); await page.waitForTimeout(500);
+  assert((await page.evaluate(() => window.scrollY)) === 0, "a new visit to the list starts at the top");
+
   // 6. offline: a stock never opened before says so, instead of "no data"
   await page.goto(base + "#/feed"); await page.waitForTimeout(1500);
   await page.reload(); await page.waitForTimeout(1500);              // now controlled by the service worker

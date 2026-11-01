@@ -137,15 +137,31 @@ def test_calibration_reports_a_holdout_not_its_own_fit():
 
 
 def test_tilt_needs_two_weekly_passes_and_switches_off_when_it_stops_working():
-    passed = {"accepted": True, "t": 3.0, "recent_gain": 0.01, "weights": {"sig": 0.01}, "mu": [0] * 7, "sd": [1] * 7}
+    from pipeline import ml
+    passed = {"accepted": True, "t": 3.0, "recent_gain": 0.01, "model": "trees", "cap": 0.02, "fv": ml.FEAT_V,
+              "last_month": "2026-08"}
     g1 = learn.tilt_gate(None, dict(passed))
     assert not g1["on"] and g1["passes"] == 1
-    g2 = learn.tilt_gate(g1, dict(passed))
-    assert g2["on"]
-    g3 = learn.tilt_gate(g2, {"accepted": False, "t": 1.8, "recent_gain": 0.004, "weights": {}})
-    assert g3["on"] and g3["weights"] == {"sig": 0.01}      # weaker but holding: keeps its weights
-    g4 = learn.tilt_gate(g3, {"accepted": False, "t": 0.5, "recent_gain": -0.01, "weights": {}})
-    assert not g4["on"] and learn.tilt_for(g4, {"sig": 1})[0] == 0.0
+    same = learn.tilt_gate(g1, dict(passed))          # the same months re-tested a week later: not new evidence
+    assert not same["on"] and same["passes"] == 1 and "newly completed month" in same["status"]
+    g2 = learn.tilt_gate(same, {**passed, "last_month": "2026-09"})
+    assert g2["on"] and g2["model"] == "trees"
+    g3 = learn.tilt_gate(g2, {"accepted": False, "t": 1.8, "recent_gain": 0.004, "model": "none", "fv": ml.FEAT_V})
+    assert g3["on"] and g3["model"] == "trees" and g3["accepted"]     # weaker but holding: keeps its algorithm
+    g4 = learn.tilt_gate(g3, {"accepted": False, "t": 0.5, "recent_gain": -0.01, "model": "none", "fv": ml.FEAT_V})
+    assert not g4["on"] and ml.SignalModel.build(g4, {"graded": {}}) is None
+
+
+def test_a_learner_whose_weekly_retest_is_overdue_is_paused():
+    from pipeline import ml
+    on = {"accepted": True, "on": True, "model": "ridge", "fv": ml.FEAT_V, "passes": 2}
+    now = dt.datetime(2026, 10, 31, 12, tzinfo=dt.timezone.utc)
+    fresh = learn.tilt_in_force({"tilt": on, "tilt_at": "2026-10-20T12:00:00Z"}, now)
+    assert fresh["on"] and fresh["model"] == "ridge"
+    stale = learn.tilt_in_force({"tilt": on, "tilt_at": "2026-10-05T12:00:00Z"}, now)
+    assert not stale["on"] and stale["model"] == "none" and stale["status"].startswith("paused")
+    assert not learn.tilt_in_force({"tilt": on}, now)["on"]                 # never re-tested: not applied
+    assert learn.tilt_in_force({"tilt": {"on": False}}, now) == {"on": False}
 
 
 # ---------------------------------------------------------------- the forecast model
