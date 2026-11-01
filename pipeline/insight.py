@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from . import analyst as A
-from . import conviction, fledger, forecast, learn, news, valuation
+from . import conviction, fledger, forecast, learn, ml, news, valuation
 from .prices import BENCH, _plausible, load_splits
 from .util import iso, log, now_et, now_utc, read_json, write_json
 
@@ -242,6 +242,34 @@ def _calib_version(calib: dict | None, tilt: dict | None) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:10]
 
 
+def _bench_on(dates, bmap: dict) -> list[float] | None:
+    """The benchmark's close on each of a stock's dates (the latest one on or before it), for relative features."""
+    if not bmap or dates is None or not len(dates):
+        return None
+    keys = sorted(bmap)
+    import bisect
+    out = []
+    for d in dates:
+        k = bisect.bisect_right(keys, int(d)) - 1
+        if k < 0 or int(d) - keys[k] > 4:
+            return None
+        out.append(bmap[keys[k]])
+    return out
+
+
+def _series_v(store, t: str, upto: dt.date):
+    """(dates, closes, volumes) up to a day; volumes None when the store has none for every day."""
+    s = store.series(t)
+    if not s or not s.get("dates"):
+        return None, None, None
+    o = upto.toordinal()
+    k = len(s["dates"])
+    while k > 0 and s["dates"][k - 1] > o:
+        k -= 1
+    v = s.get("v")
+    return s["dates"][:k], s["c"][:k], (v[:k] if v and len(v) == len(s["dates"]) else None)
+
+
 def _series(store, t: str, upto: dt.date):
     s = store.series(t)
     if not s or not s.get("dates"):
@@ -275,8 +303,40 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
     L = fledger.load(heavy_dir)
     lr = state.get("learn") or {}
     calib = {k: v for k, v in (lr.get("calib") or {}).items() if v.get("status") == "applied"}
-    tilt = lr.get("tilt")
-    cv = _calib_version(calib, tilt)
+    tilt = learn.tilt_in_force(lr, now_utc())
+    cv = _calib_version(calib, tilt) + ml.version(tilt, lr.get("range"))
+    models: dict = {}
+    failed: list[str] = []
+    memo: dict = {}
+
+    def learners():
+        """The learners that have passed their tests, refit from the record the first time a stock needs them. Each
+        is built on its own: one that can't be rebuilt is left out this run (the forecasts made without it are
+        marked, so the next run rebuilds them) and the other still applies."""
+        if not models:
+            models["s"] = models["r"] = None
+            try:
+                models["s"] = ml.SignalModel.build(tilt, L)
+                if models["s"] is not None:
+                    # the nudge says how a stock should do relative to the others, as tested: centred on the
+                    # average over the stocks the record follows (the same kind of group it was trained on)
+                    day = [f for f in (feats_for(t) for t in ledger_set if t != BENCH) if f]
+                    models["s"].set_day([f[-1] for f in day])
+                elif (tilt or {}).get("on") and (tilt or {}).get("accepted") and tilt.get("fv") == ml.FEAT_V \
+                        and tilt.get("model") in ml.CANDIDATES:
+                    failed.append("signal")             # on, but its record isn't here (a lost ledger cache, say)
+            except Exception as err:  # noqa: BLE001
+                log.warning("signal learner: %s", err)
+                models["s"] = None
+                failed.append("signal")
+            try:
+                models["r"] = ml.RangeModel.build(lr.get("range"), lr.get("calib") or {}, L)
+                if models["r"] is None and any(v.get("status") == "applied" for v in (lr.get("range") or {}).values()):
+                    failed.append("range")
+            except Exception as err:  # noqa: BLE001
+                log.warning("range learner: %s", err)
+                failed.append("range")
+        return models["s"], models["r"]
     fred = state.get("fred") or {}
     rf = (fred.get("DFF") or {}).get("value")
     rf = float(rf) / 100 if isinstance(rf, (int, float)) and 0 <= rf < 25 else float(cfg.get("risk_free", 0.04))
@@ -297,15 +357,42 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
         if e.get("ticker") and fa and lo_cut <= fa <= cut:      # known at the anchor close, and recent
             events_by_t.setdefault(e["ticker"], []).append(e)
     order = [t for t in prio if t in quotes or t == BENCH] + [t for t in quotes if t not in set(prio)]
-    built = recorded = skipped_stale = held = 0
+    b_dates, b_closes = _series(store, BENCH, anchor_day)
+    bmap = dict(zip([int(d) for d in b_dates], [float(x) for x in b_closes])) if b_dates else {}
+
+    def feats_for(t: str):
+        """(dates, closes, last close's day, features) for a stock with fresh enough history, else None."""
+        if t not in memo:
+            memo[t] = None
+            dates, closes, vols = _series_v(store, t, anchor_day)
+            if dates and len(dates) >= 130:
+                last = dt.date.fromordinal(int(dates[-1]))
+                if (anchor_day - last).days <= 4:
+                    x = ctx.get(t) or {}
+                    fx = x.get("feat") or {}
+                    val_ok = fx.get("val") is not None and fx.get("val_date") == last.isoformat() and \
+                        not (fx.get("val_filed") and fx["val_filed"] >= last.isoformat())
+                    val_feat = {"rich_pctl": fx["val"]} if val_ok else None
+                    bub_feat = {"score": fx["bub"]} if fx.get("bub") is not None else None
+                    stance = _claude_stance_asof(cfc.get(t), fch.get(t), cut)
+                    evs0 = [{**e, "score": e.get("score0", e.get("score"))} for e in events_by_t.get(t, [])]
+                    memo[t] = (dates, closes, last, learn.features(evs0, quotes.get(t) or {}, val_feat, bub_feat,
+                                                                   stance, closes, _bench_on(dates, bmap), vols))
+        return memo[t]
+    built = recorded = skipped_stale = held = degraded = 0
     held_list: list[str] = []
     seen: set[str] = set()
     splits = load_splits(settings.cache_dir)
-    for t in dict.fromkeys(order):
+    # the S&P 500 first (its record is the market's surprise the learners measure against); forecasts made earlier on
+    # this close without a learner that's on come last, and are redone only once the learners can be built again
+    todo = list(dict.fromkeys([BENCH] + order))
+    redo = [t for t in todo if str((fcache.get(t) or {}).get("cv", "")).endswith("!")]
+    todo = [t for t in todo if t not in set(redo)] + redo
+    for t in todo:
         if time.monotonic() - t0 > secs:
             break
         seen.add(t)
-        dates, closes = _series(store, t, anchor_day)
+        dates, closes, _ = _series_v(store, t, anchor_day)
         if not dates or len(dates) < 130:
             continue
         last = dt.date.fromordinal(int(dates[-1]))
@@ -316,6 +403,10 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
         old = fcache.get(t)
         if old and old.get("made") == last.isoformat() and old.get("cv") == cv:
             continue
+        if old and old.get("made") == last.isoformat() and old.get("cv") == cv + "!":
+            learners()
+            if failed:
+                continue                      # the learner still can't be built: keep this one until it can
         tail = np.asarray(closes[-6:], dtype=float)
         tail_days = [dt.date.fromordinal(int(d)) for d in dates[-len(tail):]]
         if len(tail) > 1 and np.all(tail > 0) and any(
@@ -327,26 +418,33 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
             continue
         x = ctx.get(t) or {}
         q = quotes.get(t) or {}
-        fx = x.get("feat") or {}
-        val_ok = fx.get("val") is not None and fx.get("val_date") == last.isoformat() and \
-            not (fx.get("val_filed") and fx["val_filed"] >= last.isoformat())
-        val_feat = {"rich_pctl": fx["val"]} if val_ok else None
-        bub_feat = {"score": fx["bub"]} if fx.get("bub") is not None else None
-        stance = _claude_stance_asof(cfc.get(t), fch.get(t), cut)
-        evs0 = [{**e, "score": e.get("score0", e.get("score"))} for e in events_by_t.get(t, [])]
-        feats = learn.features(evs0, q, val_feat, bub_feat, stance, closes)
-        tilt_ret, parts, tilt_days = learn.tilt_for(tilt, feats)
-        try:
-            fc = forecast.build(t, dates, closes, beta=q.get("beta"), rf=rf, erp=erp, earnings_next=q.get("earnings"),
-                                past_earnings=x.get("past_earnings"), macro=macro, calib=calib, tilt_ret=tilt_ret,
-                                tilt_days=tilt_days, tilt_parts=parts, div_yield=(x.get("val") or {}).get("div_yield"),
-                                paths=paths)
-        except Exception as err:  # noqa: BLE001 – one stock's bad data must not stop the rest
-            log.warning("forecast %s: %s", t, err)
+        got = feats_for(t)
+        if not got:
             continue
+        feats = got[-1]
+
+        def build(calib, tilt_ret, tilt_days, tilt_parts, t=t, dates=dates, closes=closes, q=q, x=x):
+            return forecast.build(t, dates, closes, beta=q.get("beta"), rf=rf, erp=erp, earnings_next=q.get("earnings"),
+                                  past_earnings=x.get("past_earnings"), macro=macro, calib=calib, tilt_ret=tilt_ret,
+                                  tilt_days=tilt_days, tilt_parts=tilt_parts,
+                                  div_yield=(x.get("val") or {}).get("div_yield"), paths=paths)
+        plain = False
+        try:
+            sm, rm = learners()
+            # the S&P 500 gets no stock-versus-stock nudge (it isn't in what the learner was trained or centred on)
+            fc, _ = ml.forecast_with_learning(build, feats, calib, None if t == BENCH else sm, rm)
+        except Exception as err:  # noqa: BLE001 – a learner failing on one stock: forecast it without the learners
+            log.warning("forecast %s with the learners: %s", t, err)
+            plain = True
+            try:
+                fc = build(calib=calib, tilt_ret=0.0, tilt_days=21, tilt_parts=[])
+            except Exception as err2:  # noqa: BLE001 – one stock's bad data must not stop the rest
+                log.warning("forecast %s: %s", t, err2)
+                continue
         if fc is None:
             continue
-        fc["cv"] = cv
+        degraded += bool(plain or failed)
+        fc["cv"] = cv + ("!" if plain or failed else "")      # made without a learner that's on: rebuilt next run
         fc["next_earnings"] = next((e.get("announce") for e in fc["events"] if e["kind"] == "earnings"), None)
         fcache[t] = fc
         built += 1
@@ -357,7 +455,8 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
                 if h == 63:
                     extra["pd"] = hz.get("p_dd20")
                 recorded += fledger.record(L, "quant", t, fc["made"], h, hz["lq"], lq_raw=hz["lq_raw"], pup=hz["p_up"],
-                                           naive=forecast.naive_lq(fc["naive_sigma_d"], h), feats=feats,
+                                           naive=forecast.naive_lq(fc["naive_sigma_d"], h),
+                                           feats=ml.row_features(feats, fc, name),
                                            bubble=(x.get("bubble") or {}).get("level"), extra=extra or None)
     keep = set(quotes) | {BENCH}
     for t in [t for t in fcache if t not in keep]:
@@ -372,7 +471,9 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
     if recorded:
         fledger.save(heavy_dir, L)
         settings.mark_heavy_dirty()
-    return built, (f"{len(fcache)} stocks forecast ({built} updated); {recorded} forecasts written to the ledger"
+    note = (f"; {degraded} made without the {' and '.join(failed) or 'learners'} (couldn't be rebuilt; retried next run)"
+            if degraded else "")
+    return built, (f"{len(fcache)} stocks forecast ({built} updated){note}; {recorded} forecasts written to the ledger"
                    + (f"; {skipped_stale} skipped (stale prices)" if skipped_stale else "")
                    + (f"; {held} held for a split re-base" if held else ""))
 
@@ -423,7 +524,7 @@ def _beta_at(c: np.ndarray, spy: np.ndarray, i: int, n: int = 252) -> float | No
 
 def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed: set | None = None,
                  ctx: dict | None = None) -> tuple[int, str]:
-    """Walk-forward backtest of the forecast model: every 10 trading days over the stored history, a sample of
+    """Walk-forward backtest of the forecast model: once a week over the stored history, a sample of
     the stocks that were liquid *on that day* (delisted ones included, so it isn't flattered by survivors), each
     forecast with only the data available then (beta, earnings dates, Fed and CPI days as the live model sees
     them) and graded against what happened. Resumes across runs (time-boxed); live grades replace it."""
@@ -438,9 +539,20 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
     bt = L.setdefault("bt", {})
     today = now_et().date()
     per_anchor = int(cfg.get("backtest_stocks", 150))
-    if bt.get("built") != today.isoformat()[:7] or bt.get("v") != 2:      # a fresh grid once a month
+    if bt.get("built") != today.isoformat()[:7] or bt.get("v") != 3:      # the grid is extended once a month
         last = panel.T - 1
-        anchors = [i for i in range(last - 1, 300, -10)][: int(cfg.get("backtest_anchors", 40))]
+        # one anchor a week (its last session), fixed to the calendar: the same dates every month, so stock-dates
+        # already graded are skipped and the record grows by about four new weeks a month (years of months, which
+        # is what the signal learner's test needs)
+        this_week = dt.date.fromordinal(int(panel.dates[last])).isocalendar()[:2]
+        wk: dict = {}
+        for i in range(260, last):
+            w = dt.date.fromordinal(int(panel.dates[i])).isocalendar()[:2]
+            if w != this_week:
+                wk[w] = i
+        anchors = sorted(wk.values(), reverse=True)[: int(cfg.get("backtest_anchors", 120))]
+        seen = L.get("bt_seen") or {}
+        # queued by date: days added to the price history between runs shift the row positions
         live_end = {}
         for t, j in panel.col.items():
             col = panel.close[:, j]
@@ -448,13 +560,17 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
             live_end[t] = int(nz[-1]) if len(nz) else -1
         todo = []
         for i in anchors:
+            day = dt.date.fromordinal(int(panel.dates[i])).isoformat()
+            fits = [h for _, h in forecast.HORIZONS[:4] if i + h < panel.T]
             names = [t for t in quant.liquid_universe(panel, i, None)
                      if _PLAIN.match(t) and t != BENCH
                      and ((allowed is None or t in allowed) or live_end.get(t, -1) < last - 20)]
-            names = sorted(names, key=lambda t: hashlib.sha1(f"{t}:{i}".encode()).hexdigest())[:per_anchor]
-            todo += [[t, i] for t in names] + [[BENCH, i]]
-        bt.update(v=2, built=today.isoformat()[:7], anchors=anchors, todo=todo, n_names=len(todo))
-        cut = (today - dt.timedelta(days=800)).isoformat()
+            names = sorted(names, key=lambda t: hashlib.sha1(f"{t}:{day}".encode()).hexdigest())[:per_anchor]
+            todo += [[t, int(panel.dates[i])] for t in names + [BENCH]
+                     if not all(f"quant_bt:{t}:{h}:{day}" in seen for h in fits)]
+        bt.update(v=3, built=today.isoformat()[:7], anchors=[int(panel.dates[i]) for i in anchors], todo=todo,
+                  n_names=len(todo))
+        cut = (today - dt.timedelta(days=1600)).isoformat()
         L["bt_seen"] = {k: 1 for k in (L.get("bt_seen") or {}) if k.rsplit(":", 1)[-1] >= cut}
     macro = forecast.macro_events(cfg.get("macro_events"))
     paths = int(cfg.get("backtest_paths", 800))
@@ -462,11 +578,14 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
     ctx = ctx or {}
     proxies: dict[str, list[str]] = {}
     done = added = 0
+    filled = _fill_bt_features(L, panel, spy)
     todo = bt.get("todo") or []
+    pos = {int(d): k for k, d in enumerate(panel.dates)}
     while todo and time.monotonic() - t0 < secs:
-        t, i = todo.pop()
+        t, day_ord = todo.pop()
+        i = pos.get(int(day_ord))
         c = panel.c(t)
-        if c is None:
+        if c is None or i is None:
             continue
         hist = c[: i + 1]
         ok = np.isfinite(hist) & (hist > 0)
@@ -474,11 +593,13 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
             continue
         dates = [int(d) for d in panel.dates[: i + 1][ok]]
         anchor = dt.date.fromordinal(int(panel.dates[i]))
+        bfeat = _bt_features(hist, spy, i, ok, panel.v(t)) if t != BENCH else None
         known = (ctx.get(t) or {}).get("past_earnings")
         when = (ctx.get(t) or {}).get("earnings_when") or {}
         nxt = None
         if known:                             # filing dates: the next one is usually announced weeks ahead
-            upcoming = [d for d in known if anchor.isoformat() < d <= (anchor + dt.timedelta(days=35)).isoformat()]
+            # (two weeks ahead: later ones may not have been announced yet; the model estimates those, as live)
+            upcoming = [d for d in known if anchor.isoformat() < d <= (anchor + dt.timedelta(days=14)).isoformat()]
             if upcoming:
                 nxt = {"date": upcoming[0], "time": when.get(upcoming[0], "post")}
         else:                                 # volume-spike estimates: the past only (no peeking at later spikes)
@@ -521,12 +642,57 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
             hz = fc["horizons"][name]
             added += fledger.add_backtest(L, t, made, h, hz["lq"], hz["lq_raw"], hz["p_up"],
                                           forecast.naive_lq(fc["naive_sigma_d"], h), r, dd, today, float(c[i]),
-                                          float(c[k]), dt.date.fromordinal(int(panel.dates[k])))
+                                          float(c[k]), dt.date.fromordinal(int(panel.dates[k])),
+                                          feats=ml.row_features(bfeat, fc, name) if bfeat else None)
     bt["todo"] = todo
     fledger.save(heavy_dir, L)
     settings.mark_heavy_dirty()
     left = len(todo)
-    return added, (f"{added} backtest forecasts graded this run" + (f"; {left} stock-dates to go" if left else "; complete"))
+    return added, (f"{added} backtest forecasts graded this run" + (f"; {left} stock-dates to go" if left else "; complete")
+                   + (f"; signal features added to {filled} earlier ones" if filled else ""))
+
+
+def _bt_features(hist: np.ndarray, spy: np.ndarray | None, i: int, ok: np.ndarray, vol: np.ndarray | None = None
+                 ) -> dict | None:
+    """Price and volume features known at a backtest anchor (row i), from the stock's valid closes (and volumes) up
+    to it and the S&P 500's closes on the same days."""
+    if spy is None:
+        return None
+    b = spy[: i + 1][ok]
+    if not np.all(np.isfinite(b) & (b > 0)):
+        return None
+    v = vol[: i + 1][ok].tolist() if vol is not None else None
+    f = ml.price_features(hist[ok].tolist(), b.tolist(), v)
+    return f if "rev" in f else None
+
+
+def _fill_bt_features(L: dict, panel, spy: np.ndarray | None, limit: int = 6000) -> int:
+    """Backtest rows written before this version's features get them now (same prices and volumes, same anchor day).
+    Whether an earnings report fell inside the window isn't known for these, so it stays blank."""
+    if spy is None:
+        return 0
+    n = 0
+    for h in ("1", "5", "21", "63"):
+        for r in (L.get("graded", {}).get("quant_bt", {}).get(h) or []):
+            if n >= limit:
+                return n
+            if (r.get("f") or {}).get("v") == ml.FEAT_V or r.get("f_tried") == ml.FEAT_V:
+                continue
+            c = panel.c(r["t"])
+            i = panel.ix_on_or_before(dt.date.fromisoformat(r["made"]))
+            f = None
+            if c is not None and i is not None and panel.dates[i] == dt.date.fromisoformat(r["made"]).toordinal():
+                hist = c[: i + 1]
+                ok = np.isfinite(hist) & (hist > 0)
+                if ok.any() and ok[-1]:
+                    f = _bt_features(hist, spy, i, ok, panel.v(r["t"]))
+            if f:
+                r["f"] = {k: round(float(v), 4) for k, v in f.items()}
+                r.pop("f_tried", None)
+            else:
+                r["f_tried"] = ml.FEAT_V          # not enough history on that date: don't look again
+            n += 1
+    return n
 
 
 def merge_claude_forecasts(settings, state: dict, heavy_dir: Path) -> int:
@@ -595,7 +761,7 @@ def _series_fn(panel, store):
     return get
 
 
-def job_grade_learn(settings, state: dict, panel, store, heavy_dir: Path) -> tuple[int, str]:
+def job_grade_learn(settings, state: dict, panel, store, heavy_dir: Path, budget=None) -> tuple[int, str]:
     L = fledger.load(heavy_dir)
     get = _series_fn(panel, store)
     mlast = int(panel.dates[-1]) if panel is not None else ((store.series(BENCH) or {}).get("dates") or [None])[-1]
@@ -603,12 +769,27 @@ def job_grade_learn(settings, state: dict, panel, store, heavy_dir: Path) -> tup
     cfg = settings.c("forecast", default={}) or {}
     calib = learn.calibration(L, min_n=int(cfg.get("calib_min_n", 200)), min_dates=int(cfg.get("calib_min_dates", 20)))
     lr = state.get("learn") or {}
+    rl = lr.get("range")
+    try:                                              # the range learner: re-tested with every calibration
+        rl = ml.range_learner(L, calib, prev=lr.get("range"))
+    except Exception as err:  # noqa: BLE001 – keep the last decision if the test itself fails
+        log.warning("range learner: %s", err)
     tilt = lr.get("tilt")
-    if not tilt or not lr.get("tilt_at") or (now_utc() - dt.datetime.fromisoformat(lr["tilt_at"].replace("Z", "+00:00"))).days >= 7:
-        tilt = learn.tilt_gate(tilt, learn.tilt_weights(L))      # on only after two weekly passes in a row
-        lr["tilt_at"] = iso(now_utc())
+    left = budget.left() - 120 if budget is not None else 600.0
+    tilt = learn.tilt_in_force(lr, now_utc())
+    due = (not tilt or not lr.get("tilt_at") or tilt.get("fv") != ml.FEAT_V
+           or (now_utc() - dt.datetime.fromisoformat(lr["tilt_at"].replace("Z", "+00:00"))).days >= 7)
+    if due and left > 60:
+        try:
+            res = ml.compete(L, seconds=min(300.0, left))   # the weekly algorithm competition (time-boxed)
+            if not res.get("postponed"):
+                tilt = learn.tilt_gate(tilt if (tilt or {}).get("fv") == ml.FEAT_V else None, res)
+                lr["tilt_at"] = iso(now_utc())      # on only after two weekly passes in a row
+        except Exception as err:  # noqa: BLE001
+            log.warning("signal learner: %s", err)
     m = fledger.metrics(L)
-    state["learn"] = {**lr, "calib": calib, "tilt": tilt, "blend": learn.blend_weights(L), "updated": iso(now_utc())}
+    state["learn"] = {**lr, "calib": calib, "tilt": tilt, "range": rl, "blend": learn.blend_weights(L),
+                      "updated": iso(now_utc())}
     state["fc_metrics"] = m
     write_json(settings.cache_dir / FEEDBACK, claude_feedback(L, m, get))
     fledger.save(heavy_dir, L)
@@ -616,7 +797,8 @@ def job_grade_learn(settings, state: dict, panel, store, heavy_dir: Path) -> tup
     applied = [k for k, v in calib.items() if v.get("status") == "applied"]
     return n, (f"{n} forecasts graded; {m['pending']} waiting; calibration applied at "
                + (", ".join(applied) if applied else "no horizon yet (needs 200+ graded from 20+ days)")
-               + f"; signal tilts {'applied' if tilt.get('on') else 'not applied'}")
+               + f"; signal learner {'on (' + ml.NAMES.get((tilt or {}).get('model'), '?') + ')' if (tilt or {}).get('on') else 'off'}"
+               + f"; range learner on at {', '.join(k for k, v in (rl or {}).items() if v.get('status') == 'applied') or 'no horizon'}")
 
 
 def claude_feedback(L: dict, m: dict, get) -> dict:
@@ -785,6 +967,7 @@ def publish_stocks(settings, state: dict, ctx: dict, panel, store) -> int:
                  "for yet. It returns once the history is re-based.")
     names = set(ctx) | set(fcache)
     written, failed = set(), 0
+    index: list[dict] = []
     cut = (now_utc() - dt.timedelta(days=45)).isoformat()
     for t in names:
         if not _plausible(t):
@@ -806,16 +989,41 @@ def publish_stocks(settings, state: dict, ctx: dict, panel, store) -> int:
                    "conviction": x.get("conv"), "industry": x.get("industry"), "first_filed": x.get("first_filed")}
             write_json(out_dir / f"{t}.json", doc)
             written.add(f"{t}.json")
+            if fc:
+                index.append(_index_row(t, doc, fc))
         except Exception as err:  # noqa: BLE001
             failed += 1
             log.warning("stock page %s: %s", t, err)
             if (out_dir / f"{t}.json").exists():
-                written.add(f"{t}.json")       # keep the last good page rather than none
+                written.add(f"{t}.json")       # keep the last good page rather than none (and its line in the list)
+                try:
+                    old = read_json(out_dir / f"{t}.json") or {}
+                    if old.get("forecast"):
+                        index.append(_index_row(t, old, old["forecast"]))
+                except Exception:  # noqa: BLE001
+                    pass
     for f in out_dir.glob("*.json"):
         if f.name not in written:
             f.unlink(missing_ok=True)
     state["stock_pages"] = {"written": len(written), "failed": failed, "names": len(names)}
+    index.sort(key=lambda r: r["t"])
+    write_json(settings.out_dir / "forecasts.json", {"generated_at": gen, "enabled": bool(fc_on), "n": len(index),
+                                                     "stocks": index})
     return len(written)
+
+
+def _index_row(t: str, doc: dict, fc: dict) -> dict:
+    """One line of the list of every stock with a forecast: enough to compare them at a glance."""
+    def hz(name):
+        h = (fc.get("horizons") or {}).get(name) or {}
+        q = h.get("q") or {}
+        return {"lo": q.get("10"), "mid": q.get("50"), "hi": q.get("90"), "up": h.get("p_up")} if q else None
+    conv = doc.get("conviction") or {}
+    return {"t": t, "name": doc.get("name"), "made": fc.get("made"), "close": fc.get("anchor"),
+            "m1": hz("1m"), "m3": hz("3m"), "y1": hz("1y"),
+            "val": (doc.get("valuation") or {}).get("label"), "bubble": (doc.get("bubble") or {}).get("level"),
+            "rating": conv.get("rating"), "claude": bool(doc.get("claude")),
+            "nudge": (fc.get("tilt") or {}).get("ret") or None}
 
 
 def _slim_fc(fc: dict | None) -> dict | None:
@@ -874,7 +1082,7 @@ def accuracy_doc(settings, state: dict, led_metrics: dict | None) -> dict:
     lr = state.get("learn") or {}
     return {
         "generated_at": iso(now_utc()), "metrics": state.get("fc_metrics"),
-        "learning": {"calibration": lr.get("calib"), "tilt": lr.get("tilt"), "blend": lr.get("blend"),
+        "learning": {"calibration": lr.get("calib"), "tilt": lr.get("tilt"), "range": lr.get("range"), "blend": lr.get("blend"),
                      "updated": lr.get("updated")},
         "lessons": [{**L, "lesson": A.sanitize_lesson(L.get("lesson"))} for L in reversed((ai.get("lessons") or [])[-20:])
                     if A.sanitize_lesson(L.get("lesson"))],

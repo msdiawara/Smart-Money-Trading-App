@@ -5,7 +5,7 @@ re-publish the same government filings later, so they can never be fresher than 
 errors. Third-party services are used only where the official source can't be reached from a cloud server,
 or for data that has no official source (prices, eToro rankings).
 
-Last researched and audited: 31 Oct 2026. The *Audit log* at the bottom records how each claim was checked and what changed as a result.
+Last researched and audited: 1 Nov 2026. The *Audit log* at the bottom records how each claim was checked and what changed as a result.
 
 ## 1. Corporate insiders (CEOs, directors, 10% owners): SEC Form 4
 | | |
@@ -260,5 +260,64 @@ How the data choices were checked (30 Oct 2026):
    * *Final run:* 196 Python tests, both browser tests (chat, and the app in light and dark with the forecast chart,
      records, self-check, offline mode and a paid forecast against a mock API), pyflakes, actionlint and node syntax checks
      all pass.
+
+11. **Sixth round: does the forecasting actually learn? (31 Oct 2026).**
+   * *Method:* the learning loop was traced end to end in the code (grading → calibration, signal learning and blend weights →
+     stored → used by the next forecasts), then run exactly as the pipeline runs it over 400 trading days of simulated markets
+     (36 stocks; a market factor, volatility clustering, fat tails, earnings jumps the model isn't told about, volatility steps),
+     with every forecast also made without learning and both scored on the same outcomes. Worlds: no real signal, bigger
+     earnings jumps than the history shows, a sustained volatility step-up, and weak and strong planted signals.
+   * *Found:* the wiring was complete, but the learning didn't reliably improve accuracy. Calibration counted every day as new
+     evidence, though a month of daily forecasts shares most of its outcome and every stock rides the same market, so it chased
+     noise and made 1-month forecasts up to 4.7% worse in some quarters. The signal learner could not start for about ten
+     months, kept only half of any effect however much data it had, filled missing values differently when fitting and when
+     applying, and in the no-signal world switched on by chance.
+   * *Fixed:* evidence is counted in independent months; a calibration is used only if it would have improved the newest
+     forecasts it wasn't fitted on; the signal learner predicts how each stock does relative to the others that day (removing
+     the market's own move), uses momentum and last month's move relative to the S&P 500, learns from the backtest from the
+     first day, keeps two years of 1-month records, and shrinks less as evidence grows; older feature definitions are never
+     mixed in. Pinned by tests in `tests/test_forecast.py` and `tests/test_review4.py`; the before/after results are in
+     METHODS section 9.
+
+12. **Seventh round: the strongest learning the data can support, audited three times (31 Oct – 1 Nov 2026).**
+   * *Change:* the single ridge regression became a weekly competition between ridge regression, gradient-boosted trees, a
+     neural network and their average. Each is tested month by month on forecasts it never saw, and the choice of
+     algorithm is itself tested that way (nested walk-forward selection). A second learner was added for range widths
+     that depend on the stock's situation, and the signal set gained volatility, volume, 52-week-high and short-term
+     reversal features. Every stock with a forecast is now listed on a searchable *All forecasts* page
+     (`data/forecasts.json`).
+   * *Audit 1 (independent statistics review):* no leakage that mattered. The weak points were:
+     * too few independent months for the test to tell a weak signal from luck;
+     * a target and scoring not fully stock-versus-stock (beta could learn one period's market move; predictions weren't
+       centred or capped as deployed);
+     * a significance bar too loose when test months are few, and a second weekly pass that could re-test the same months;
+     * period counts that flipped as the window moved;
+     * an in-sample constant in the range learner, which would make ranges too narrow;
+     * the backtest seeing earnings dates up to 35 days ahead.
+
+     All fixed. Records are kept longer and the S&P 500's always. The target removes each stock's beta times the market's
+     own surprise and the day's average. Scoring matches use. The bar is Student's t at 99.5% (4.0 with 6 test months)
+     and the second pass needs a newly completed month. The constant is computed out of fold. The backtest now runs
+     weekly on calendar-fixed dates, with earnings dates known two weeks ahead.
+   * *Audit 2 (independent app review):* the new list's search box broke phone keyboards that compose words, the list
+     jumped to the top on refreshes and Back, a saved offline copy could stick, chances read like price moves ("+50%"),
+     and a learner that failed to rebuild was cached silently. All fixed.
+   * *Audit 3 (independent check of the fixes):* confirmed them and found more:
+     * a day without the S&P 500's own record let beta back into the target (now estimated from that day's stocks);
+     * the S&P 500 itself got a stock-versus-stock nudge;
+     * live and backtest rows for the same stock and day counted twice;
+     * a one-day stub of a new month counted as a test month;
+     * the row cap split days and months;
+     * the coverage warning rested on up to four years of data;
+     * the backtest queue stored row positions that shift when history is added.
+
+     All fixed. Each finding is pinned by a test in `tests/test_ml.py`, `tests/test_review3.py` or `tests/browser/test_app.js`.
+   * *Simulation check:* the same four simulated markets were run with the previous version and this one, with every
+     forecast also made without learning (METHODS section 9 has the full table):
+     * with no real signal, the signal learner never switched on;
+     * with planted signals, the competition picked ridge for a straight-line effect and the average of the three for one
+       that bends, improving every quarter (1-month forecasts by 4.1% and 2.7%, against 3.9% and 2.0% before);
+     * with bigger earnings jumps than in the history, the range learner improved 1-week and 1-month forecasts by about
+       1.8%, where the previous version changed nothing.
 
 Still unconfirmed (and handled defensively): which FMP plan includes Senate data; Tiingo/Finnhub limits (not used); the EDGAR feed's maximum page size (the app uses 100); whether `AFF10B5ONE` appears in every data-set file (optional column); the exact file names of five of ARK's six holdings files and ARK's website terms (see section 11).

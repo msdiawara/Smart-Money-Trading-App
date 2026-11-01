@@ -211,10 +211,29 @@ horizon and for the model, Claude, the combined forecast and the backtest, with 
   machine, gets 80–90% of stock directions right over weeks or months; anyone claiming that is overfitting or selling something.
   So the app aims its 80% target at what can be measured honestly (range coverage and skill) and shows direction as it is.
 
-**How it learns from its mistakes:** range widths are re-calibrated per horizon from graded results (from a backtest on day
-one, then from live grades); a signal is allowed to tilt the forecast only after it has beaten a walk-forward test on later
-months; the model/Claude mix follows their measured skill; and Claude reviews its worst misses, and the causes that at least
-two of those reviews agree on (from fixed lists, never free text) go into its next forecasts. Details and the statistics are in [`docs/METHODS.md`](docs/METHODS.md) (sections 7–9).
+**How it learns from its mistakes:**
+* **Range calibration:** widths are re-calibrated per horizon from graded results (from a backtest on day one, then from live
+  grades). Evidence is counted in independent months, and a correction is used only if it would have improved the newest
+  forecasts it wasn't fitted on.
+* **Range learner (machine learning):** gradient-boosted trees test whether the right range width depends on the stock's
+  situation (volatility rising or falling, a recent big move, an earnings report in the window). They're used at a horizon
+  only if they beat the single width on recent forecasts they weren't fitted on.
+* **Signal learner (machine learning, a weekly competition):** four algorithms compete to predict which stocks will beat
+  their forecast relative to the others: ridge regression, gradient-boosted trees, a neural network and the average of the
+  three. They use the app's signals: momentum, recent moves, volatility, volume, smart-money trades, valuation, Claude's
+  stance, insider buying and bubble score. Each is tested month by month on forecasts it never saw, and the one with the
+  best record so far is used. A nudge is applied only if that record passes a strict significance test, twice. With weak
+  signals the honest answer is often "no nudge", and the app shows that test as it runs.
+* **Model and Claude:** their mix follows their measured skill on the same forecasts.
+* **Claude's misses:** Claude reviews its worst misses, and the causes that at least two of those reviews agree on (from fixed
+  lists, never free text) go into its next forecasts.
+
+The loop was checked on simulated markets against the same forecasts without learning:
+* With nothing to learn, the signal learner stayed off.
+* With a planted signal, the competition picked the right kind of model and improved 1-week to 3-month forecasts in every
+  quarter, by up to about 6%.
+* When earnings jumps grew bigger than in the history, the range learner improved 1-week and 1-month forecasts by about 2%.
+Details, statistics and the simulation results are in [`docs/METHODS.md`](docs/METHODS.md) (sections 7–9).
 
 Accuracy needs time: the first 1-day grades arrive the next trading day, 1-month grades after a month, and live calibration
 switches on after about 200 graded forecasts from 20+ days. Until then the backtest (the model re-run on past prices) fills in.

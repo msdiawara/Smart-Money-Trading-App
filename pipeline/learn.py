@@ -2,14 +2,18 @@
 
 1. Calibration (per horizon, daily). If the model's 80% ranges contained only 70% of outcomes, they were too
    narrow: the app finds the stretch that would have made 80% fit, and the median nudge that removes a
-   consistent bias, then applies them to new forecasts. Shrunk toward "no change" until there are hundreds of
-   graded forecasts from many different days (outcomes on the same day move together), and capped.
-2. Signal tilts (weekly). Do the app's signals (insider buying, momentum, valuation, Claude's stance…) predict
-   where the price ends up relative to the model's median? A heavily shrunk (ridge) regression is fitted on
-   older forecasts and must improve the error on newer ones it never saw, in both halves of that test period.
-   Only then does it nudge the drift; otherwise the weights stay at zero. Most signals are weak (see
-   docs/METHODS.md), so "rejected" is the expected, honest outcome for a long time.
-3. Model vs Claude blend: weights follow each one's measured skill versus the naive forecast.
+   consistent bias. Forecasts whose outcome windows overlap (a 1-month forecast made today and one made
+   tomorrow) mostly share the same outcome, and every stock rides the same market, so evidence is counted in
+   independent periods of one horizon, not in days or rows: the correction is shrunk toward "no change" by
+   periods/(periods + 8) (the median nudge more strongly), and capped. It must also pass a hold-out test: a
+   correction fitted only on older forecasts has to score at least as well on the newest ones as no correction,
+   or it isn't applied ("do no harm").
+2. Signal tilts (weekly) and the range learner (daily): the machine learning, in ml.py. Ridge regression,
+   gradient-boosted trees, a neural network and their average compete on months they never saw; a conditional
+   calibration learns which stocks' ranges need more or less stretch. Both must beat simpler choices on unseen
+   data before they're used; the signal tilt also needs two weekly passes in a row.
+3. Model vs Claude blend: weights follow each one's measured skill on the same forecasts, shrunk by the number
+   of independent periods graded.
 4. Claude's post-mortems of its biggest misses (analyst workflow) become lessons it reads next time.
 """
 from __future__ import annotations
@@ -19,12 +23,14 @@ import math
 
 import numpy as np
 
+from . import ml
 from .forecast import HORIZONS, trading_days_after
 
-FEATS = ["sig", "mom", "rev", "val", "claude", "ins", "bub"]
-FEAT_LABELS = {"sig": "Smart-money signal score", "mom": "12-month momentum", "rev": "Last month's move",
-               "val": "Valuation (rich vs cheap)", "claude": "Claude's stance", "ins": "Insider net buying",
-               "bub": "Bubble-risk score"}
+FEATS = ml.FEATS
+FEAT_V = ml.FEAT_V       # feature definitions (3: price, volume and signal features; see ml.py)
+price_features = ml.price_features
+tilt_rows = ml.rows_for
+tilt_weights = ml.compete
 
 
 def _rows_window(L: dict, src: str, h: int, days: int) -> list[dict]:
@@ -36,10 +42,12 @@ def _rows_window(L: dict, src: str, h: int, days: int) -> list[dict]:
     return [r for r in rows if r["made"] >= cut]
 
 
-def _fit_scale(rows: list[dict], w: float, lo: float, hi: float) -> tuple[float, float, float, np.ndarray, np.ndarray]:
+def _fit_scale(rows: list[dict], w: float, lo: float, hi: float, w_shift: float | None = None
+               ) -> tuple[float, float, float, np.ndarray, np.ndarray]:
     er = np.asarray([r["er"] for r in rows], dtype=float)
     sd = 1.4826 * float(np.median(np.abs(er - np.median(er)))) or float(np.std(er)) or 1e-4
-    shift = float(np.clip(np.median(er) * w, -0.25 * sd, 0.25 * sd))
+    ws = w if w_shift is None else w_shift
+    shift = float(np.clip(np.median(er) * ws, -0.25 * sd, 0.25 * sd))
     w10 = np.maximum(np.asarray([r["w10"] for r in rows], dtype=float), 1e-6)
     w90 = np.maximum(np.asarray([r["w90"] for r in rows], dtype=float), 1e-6)
     e2 = er - shift
@@ -49,31 +57,54 @@ def _fit_scale(rows: list[dict], w: float, lo: float, hi: float) -> tuple[float,
     return scale, shift, s_hat, er, np.stack([w10, w90])
 
 
-def calibration(L: dict, src: str = "quant", min_n: int = 200, min_dates: int = 20, d0: int = 20,
-                window_days: int = 200, lo: float = 0.6, hi: float = 2.0, fallback: str | None = "quant_bt") -> dict:
-    """Per horizon. Learns from live graded forecasts of the last `window_days`; until there are enough, from the
-    walk-forward backtest (the same model run on past dates with only the data available then), and says which
-    it used. Outcomes on the same day move together, so the evidence is counted in days, not rows: the correction
-    is shrunk toward "no change" by days/(days + d0). The coverage it expects afterwards is measured on the most
-    recent 30% of days, fitted only on the older 70% (a hold-out check, not the fit grading itself)."""
+def _pinball3(er: np.ndarray, w10: np.ndarray, w90: np.ndarray, scale: float, shift: float) -> float:
+    """Mean pinball loss of the 10th, 50th and 90th percentiles after a stretch and nudge (a proper score: lower is
+    better, and it rewards ranges that are right, not just wide)."""
+    tot = 0.0
+    for tau, q in ((0.1, shift - scale * w10), (0.5, np.full_like(er, shift)), (0.9, shift + scale * w90)):
+        u = er - q
+        tot += float(np.mean(np.maximum(tau * u, (tau - 1) * u)))
+    return tot / 3
+
+
+def calibration(L: dict, src: str = "quant", min_n: int = 200, min_dates: int = 20, b0: float = 6.0,
+                window_days: int = 460, lo: float = 0.6, hi: float = 2.0, fallback: str | None = "quant_bt",
+                b_shift: float = 60.0) -> dict:
+    """Per horizon. Learns from live graded forecasts (the last `window_days`, about the 15 months kept); until there
+    are enough, from the walk-forward backtest (the same model run on past dates with only the data available
+    then), and says which it used. It corrects lasting misfit (tails fatter than the model allows, say), not this
+    month's volatility, which the model already tracks. Evidence is counted in independent periods (a month, or one
+    horizon if longer): the stretch is shrunk by periods/(periods + b0), the median nudge, for which a past market
+    move is weak evidence, by periods/(periods + b_shift). A hold-out check fits on older forecasts only (whose
+    outcomes were known before the newest ones were made) and scores the newest 30% of days: the correction is
+    applied only if it scored at least as well there as no correction."""
+    def enough(rr: list[dict], h: int) -> bool:
+        days = {r["made"] for r in rr}
+        return len(rr) >= min_n and len(days) >= min_dates and ml.periods(days, h) >= 3
+
     out = {}
     for name, h in HORIZONS:
         used = src
-        rows = _rows_window(L, src, h, window_days)
-        if fallback and (len(rows) < min_n or len({r["made"] for r in rows}) < min_dates):
-            bt = _rows_window(L, fallback, h, window_days * 3)
-            if len(bt) >= min_n and len({r["made"] for r in bt}) >= min_dates:
+        win = max(window_days, int(math.ceil(h * 7 / 5)) * 10)
+        rows = _rows_window(L, src, h, win)
+        # live grades once there are enough of them to use (independent periods included); until then the backtest,
+        # so the correction doesn't switch off while the first live months come in
+        if fallback and not enough(rows, h):
+            bt = _rows_window(L, fallback, h, max(win, window_days * 3))
+            if enough(bt, h):
                 rows, used = bt, fallback
         days = sorted({r["made"] for r in rows})
         n, nd = len(rows), len(days)
-        base = {"n": n, "dates": nd, "scale": 1.0, "shift": 0.0, "from": "live" if used == src else "backtest"}
+        periods = ml.periods(days, h)
+        base = {"n": n, "dates": nd, "periods": periods, "scale": 1.0, "shift": 0.0,
+                "from": "live" if used == src else "backtest"}
         if n:
             base["cov80_raw"] = float(np.mean([r.get("in80r", 0) for r in rows]))
-        if n < min_n or nd < min_dates:
-            out[name] = {**base, "status": "learning", "need": {"n": min_n, "dates": min_dates}}
+        if n < min_n or nd < min_dates or periods < 3:
+            out[name] = {**base, "status": "learning", "need": {"n": min_n, "dates": min_dates, "periods": 3}}
             continue
-        w = nd / (nd + d0)
-        scale, shift, s_hat, _, _ = _fit_scale(rows, w, lo, hi)
+        w = periods / (periods + b0)
+        scale, shift, s_hat, _, _ = _fit_scale(rows, w, lo, hi, periods / (periods + b_shift))
         res = {**base, "status": "applied", "scale": round(scale, 4), "shift": round(shift, 5), "s_hat": round(s_hat, 4),
                "weight": round(w, 3)}
         cut = days[int(nd * 0.7)]
@@ -84,129 +115,70 @@ def calibration(L: dict, src: str = "quant", min_n: int = 200, min_dates: int = 
         old = [r for r in rows if r["made"] < cut and ends[r["made"]] <= cut_d]   # outcome known before the test days
         new = [r for r in rows if r["made"] >= cut]
         if len(old) >= min_n // 2 and len(new) >= 30:
-            nd_old = len({r["made"] for r in old})
-            sc, shf, _, _, _ = _fit_scale(old, nd_old / (nd_old + d0), lo, hi)
-            er = np.asarray([r["er"] for r in new], dtype=float) - shf
+            p_old = ml.periods([r["made"] for r in old], h)
+            sc, shf, _, _, _ = _fit_scale(old, p_old / (p_old + b0), lo, hi, p_old / (p_old + b_shift))
+            er = np.asarray([r["er"] for r in new], dtype=float)
             w10 = np.maximum(np.asarray([r["w10"] for r in new], dtype=float), 1e-6)
             w90 = np.maximum(np.asarray([r["w90"] for r in new], dtype=float), 1e-6)
-            need = np.where(er >= 0, er / w90, -er / w10)
+            e2 = er - shf
+            need = np.where(e2 >= 0, e2 / w90, -e2 / w10)
+            loss0, loss1 = _pinball3(er, w10, w90, 1.0, 0.0), _pinball3(er, w10, w90, sc, shf)
             res.update(holdout_n=len(new), holdout_days=nd - int(nd * 0.7),
                        cov80_holdout_raw=float(np.mean([r.get("in80r", 0) for r in new])),
-                       cov80_holdout=float(np.mean(need <= sc)))
+                       cov80_holdout=float(np.mean(need <= sc)),
+                       holdout_gain=round(1 - loss1 / loss0, 5) if loss0 > 0 else None)
+            if loss0 > 0 and loss1 > loss0:          # it would have made the newest forecasts worse: don't apply it
+                res.update(status="held", scale=1.0, shift=0.0, fitted={"scale": round(scale, 4), "shift": round(shift, 5)})
         out[name] = res
     return out
 
 
-def _ridge(Z: np.ndarray, y: np.ndarray, kappa: float) -> tuple[float, np.ndarray]:
-    n, k = Z.shape
-    A = np.hstack([np.ones((n, 1)), Z])
-    P = np.eye(k + 1) * kappa * n
-    P[0, 0] = 0.0
-    b = np.linalg.solve(A.T @ A + P, A.T @ y)
-    return float(b[0]), b[1:]
-
-
-def tilt_weights(L: dict, h: int = 21, min_n: int = 600, min_months: int = 6, kappa: float = 1.0,
-                 min_gain: float = 0.002, min_t: float = 2.5) -> dict:
-    """Walk-forward test: for each month, fit on everything made before it (minus a gap the length of the
-    horizon, so no outcome overlaps), predict that month, and record the relative error reduction. Accept only
-    if the average monthly gain is positive with t ≥ 2.5 (standard error inflated by √2 for neighbouring months
-    whose outcome windows overlap; 2.5 rather than 2 because the test is repeated every week) and the last three
-    test months are positive on average. The caller also requires two passes in a row before switching it on."""
-    rows = [r for r in L["graded"].get("quant", {}).get(str(h), []) if r.get("f") and "er" in r]
-    for r in rows:                       # the error against the median *before* any tilt, so the target doesn't
-        r.setdefault("er0", r["er"])      # move once a tilt is applied (no feedback loop)
-    rows.sort(key=lambda r: r["made"])
-    months = sorted({r["made"][:7] for r in rows})
-    res = {"h": h, "n": len(rows), "months": len(months), "accepted": False, "weights": {}, "feats": FEATS}
-    if len(rows) < min_n or len(months) < min_months + 3:
-        res["status"] = f"learning: needs {min_n}+ graded {h}-day forecasts over {min_months + 3}+ months"
-        return res
-    X = np.asarray([[float(r["f"].get(k, 0.0)) for k in FEATS] for r in rows])
-    y = np.asarray([r["er0"] for r in rows], dtype=float)
-    made = np.asarray([r["made"] for r in rows])
-    gap = int(math.ceil(h * 1.4))
-    gains = []
-    for m in months[min_months:]:
-        start = dt.date.fromisoformat(m + "-01")
-        cut = (start - dt.timedelta(days=gap)).isoformat()
-        tr = made < cut
-        te = np.asarray([x[:7] == m for x in made])
-        if tr.sum() < min_n * 0.5 or te.sum() < 20:
-            continue
-        mu, sd = X[tr].mean(0), X[tr].std(0)
-        sd[sd == 0] = 1.0
-        a, w = _ridge((X[tr] - mu) / sd, y[tr], kappa)
-        pred = a + ((X[te] - mu) / sd) @ w
-        base = float(np.mean(y[tr]))
-        m0 = float(np.mean((y[te] - base) ** 2))
-        m1 = float(np.mean((y[te] - pred) ** 2))
-        if m0 > 0:
-            gains.append(1 - m1 / m0)
-    res["test_months"] = len(gains)
-    if len(gains) < 3:
-        res["status"] = "learning: not enough months to test on yet"
-        return res
-    g = np.asarray(gains)
-    mean = float(g.mean())
-    se = float(g.std(ddof=1) / math.sqrt(len(g))) * math.sqrt(2) if len(g) > 1 else float("inf")
-    t = mean / se if se > 0 else 0.0
-    recent = float(g[-3:].mean())
-    res.update(test_gain=round(mean, 5), t=round(t, 2), recent_gain=round(recent, 5),
-               monthly_gains=[round(float(x), 4) for x in g[-12:]])
-    if mean > min_gain and t >= min_t and recent > 0:
-        mu, sd = X.mean(0), X.std(0)
-        sd[sd == 0] = 1.0
-        a, w = _ridge((X - mu) / sd, y, kappa)
-        res.update(accepted=True, status="applied: improved errors on later forecasts it never saw",
-                   weights={k: round(float(v), 6) for k, v in zip(FEATS, w)}, mu=mu.round(5).tolist(),
-                   sd=sd.round(5).tolist(), cap=round(0.25 * float(np.std(y)), 5))
-    else:
-        res["status"] = "rejected: didn't reliably improve forecasts it never saw (weights stay at zero)"
-    return res
-
-
-def tilt_for(tw: dict | None, feats: dict) -> tuple[float, list[dict], int]:
-    """(log-return tilt over the tested horizon, parts, that horizon in sessions) for one stock's features."""
-    if not tw or not tw.get("accepted") or not tw.get("on", True):
-        return 0.0, [], 21
-    h = int(tw.get("h") or 21)
-    parts, tot = [], 0.0
-    for k, m, sd in zip(FEATS, tw["mu"], tw["sd"]):
-        x = feats.get(k)
-        if x is None:
-            continue
-        c = tw["weights"][k] * (float(x) - m) / sd
-        tot += c
-        parts.append({"k": k, "label": FEAT_LABELS[k], "h_ret": round(c, 5)})
-    cap = tw.get("cap") or 0.02
-    tot = float(np.clip(tot, -cap, cap))
-    return tot, sorted(parts, key=lambda p: -abs(p["h_ret"]))[:4], h
-
-
 def tilt_gate(prev: dict | None, new: dict) -> dict:
-    """Hysteresis for the weekly re-test: on only after two passes in a row; once on, it stays on while the test
-    keeps t ≥ 1.5 with the last three months positive, and switches off otherwise."""
+    """Hysteresis for the weekly re-test: on only after two passes in a row, the second with a newly completed test
+    month in it (re-running the same months the next week is not new evidence); once on, it stays on while the
+    test keeps t ≥ 1.5 with the last six test months positive on average, and switches off otherwise. While on,
+    the algorithm in use is that week's winner (or, on a weaker but still positive week, the one already in use)."""
     prev = prev or {}
-    passes = (prev.get("passes", 0) + 1) if new.get("accepted") else 0
+    if new.get("accepted"):
+        fresh = not prev.get("passes") or new.get("last_month") != prev.get("last_month")
+        passes = prev.get("passes", 0) + (1 if fresh else 0)
+    else:
+        passes = 0
     if prev.get("on"):
         if (new.get("t") or 0) >= 1.5 and (new.get("recent_gain") or 0) > 0:
             if not new.get("accepted"):
-                new = {**new, "weights": prev.get("weights"), "mu": prev.get("mu"), "sd": prev.get("sd"),
-                       "cap": prev.get("cap"), "accepted": True,
+                new = {**new, "model": prev.get("model"), "cap": prev.get("cap"), "fv": prev.get("fv"), "accepted": True,
                        "status": "applied: still holding up on later forecasts (re-tested weekly)"}
             return {**new, "passes": passes, "on": True}
-        return {**new, "accepted": False, "weights": {}, "passes": passes, "on": False,
+        return {**new, "accepted": False, "model": "none", "passes": passes, "on": False,
                 "status": "switched off: stopped improving forecasts it never saw"}
     on = passes >= 2
     if new.get("accepted") and not on:
-        new = {**new, "status": "passed once: needs a second weekly pass in a row before it's applied"}
+        new = {**new, "status": "passed once: needs a second pass, with a newly completed month, before it's applied"}
     return {**new, "passes": passes, "on": on}
 
 
-def blend_weights(L: dict, n0: int = 40) -> dict:
+def tilt_in_force(lr: dict, now: dt.datetime, max_days: int = 21) -> dict | None:
+    """The signal learner's last decision, except that one switched on is paused when its weekly re-test is two
+    weeks overdue (a nudge nobody has re-checked for three weeks isn't applied). It needs two passes again after."""
+    tilt = lr.get("tilt")
+    if not tilt or not tilt.get("on"):
+        return tilt
+    try:
+        at = dt.datetime.fromisoformat(str(lr.get("tilt_at")).replace("Z", "+00:00"))
+        age = (now - at).days
+    except ValueError:
+        age = None
+    if age is None or age > max_days:
+        return {**tilt, "on": False, "accepted": False, "model": "none", "passes": 0,
+                "status": "paused: the weekly re-test hasn't run for three weeks (it's applied again once it passes)"}
+    return tilt
+
+
+def blend_weights(L: dict, b0: float = 10.0) -> dict:
     """Weight on Claude in the blend, per horizon, from Claude's and the model's skill on the *same* forecasts:
-    each graded Claude forecast also scores the model's forecast from the same close on the same outcome."""
+    each graded Claude forecast also scores the model's forecast from the same close on the same outcome. The
+    difference is trusted in proportion to the independent periods graded: periods/(periods + b0)."""
     out = {}
     for name, h in HORIZONS:
         rows = [r for r in L.get("graded", {}).get("claude", {}).get(str(h), []) if "qs_m" in r and "qsn" in r]
@@ -217,31 +189,15 @@ def blend_weights(L: dict, n0: int = 40) -> dict:
         sc = 1 - sum(r["qs"] for r in rows) / qsn if qsn > 0 else 0.0
         sm = 1 - sum(r["qs_m"] for r in rows) / qsn if qsn > 0 else 0.0
         nd = len({r["made"] for r in rows})
-        shrink = nd / (nd + n0)
+        periods = ml.periods([r["made"] for r in rows], h)
+        shrink = periods / (periods + b0)
         w = 0.5 + float(np.clip((sc - sm) * 2, -0.3, 0.3)) * shrink
-        out[name] = {"w_claude": round(w, 3), "n": len(rows), "days": nd, "skill_claude": round(sc, 4),
+        out[name] = {"w_claude": round(w, 3), "n": len(rows), "days": nd, "periods": periods, "skill_claude": round(sc, 4),
                      "skill_model": round(sm, 4), "status": "weighted by skill on the same forecasts"}
     return out
 
 
 def features(e_scores: list[dict], quote: dict | None, val: dict | None, bub: dict | None, claude_stance: str | None,
-             closes: list[float] | None) -> dict:
-    """Signal features recorded with each forecast (for learning which ones matter)."""
-    f: dict = {}
-    s = sum(((x.get("score") or 0) / 100.0) * (1 if x.get("direction") == "bullish" else -1 if x.get("direction") == "bearish" else 0)
-            for x in e_scores)
-    f["sig"] = max(-2.0, min(2.0, s))
-    if closes and len(closes) > 253:
-        c = closes
-        if c[-253] > 0 and c[-22] > 0 and c[-1] > 0:
-            f["mom"] = math.log(c[-22] / c[-253])
-            f["rev"] = math.log(c[-1] / c[-22])
-    if val and val.get("rich_pctl") is not None:
-        f["val"] = val["rich_pctl"] / 100 - 0.5
-    f["claude"] = {"favorable": 1.0, "watch": 0.5, "neutral": 0.0, "unfavorable": -1.0}.get(claude_stance or "", 0.0)
-    ins_b = sum(1 for x in e_scores if x.get("kind") == "insider" and x.get("action") == "buy" and x.get("signal") != "noise")
-    ins_s = sum(1 for x in e_scores if x.get("kind") == "insider" and x.get("action") in ("sell", "sale_notice"))
-    f["ins"] = max(-3, min(3, ins_b - ins_s)) / 3
-    if bub and bub.get("score") is not None:
-        f["bub"] = min(1.0, bub["score"] / 10)
-    return f
+             closes: list[float] | None, bench: list[float] | None = None, volumes: list[float] | None = None) -> dict:
+    """Signal features recorded with each forecast (for learning which ones matter): see ml.py."""
+    return {**ml.price_features(closes, bench, volumes), **ml.signal_features(e_scores, val, bub, claude_stance)}

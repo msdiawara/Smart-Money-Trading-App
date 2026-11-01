@@ -682,7 +682,7 @@ FORECAST_SCHEMA = {
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
         "thesis": {"type": "string"}, "risks": _arr("Concrete risks"),
         "what_would_change_my_mind": {"type": "string"},
-        "lessons_applied": _arr("Which of your past lessons you applied here, if any"),
+        "lessons_applied": _arr("Which patterns in your past misses (patterns_in_your_misses) you applied here, if any"),
     },
     "required": ["horizons", "path_notes", "dip_risk", "peak_view", "key_dates", "scenarios", "valuation_view",
                  "bubble_view", "ai_exposure", "news_digest", "stance", "probability", "confidence", "thesis", "risks",

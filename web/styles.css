@@ -120,7 +120,7 @@ h2.page-title + .page-sub { margin-top: 2px; }
 .pagebar { display: flex; align-items: center; justify-content: space-between; margin: 0 0 6px; }
 .toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
 .search { flex: 1; min-width: 0; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 10px; padding: 9px 12px; font-size: 15px; font-family: inherit; }
-select.search { flex: none; width: auto; }
+select.search { flex: none; width: auto; max-width: 42%; }
 .chips { display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 10px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .chips::-webkit-scrollbar { display: none; }
 .chip { flex: none; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink-2); border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
@@ -417,3 +417,13 @@ details.idea summary::-webkit-details-marker { display: none; }
 .riskday { margin: 10px 0 2px; font-size: 14px; }
 .viz-evlabel.strong { fill: var(--ink-2); font-weight: 600; }
 table.cmp.left2 td:nth-child(2), table.cmp.left2 th:nth-child(2) { text-align: left; }
+
+/* the list of every stock with a forecast */
+.fc-list { display: grid; gap: 8px; margin-top: 10px; }
+.fc-row { display: flex; gap: 12px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 11px 13px; color: var(--ink); text-decoration: none; }
+.fc-row:hover, .fc-row:focus-visible { border-color: var(--line-2); }
+.fc-row .grow { min-width: 0; }
+.fc-row .chips-row { margin-top: 6px; }
+.fc-row .quote { text-align: right; flex: none; }
+.fc-row .quote b { font-size: 16px; }
+.menu + .sec, .menu + .panel { margin-top: 14px; }

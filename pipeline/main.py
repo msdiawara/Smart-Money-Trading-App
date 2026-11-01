@@ -337,7 +337,7 @@ def run(force: set[str] | None = None, transport=None, settings: Settings | None
     do("claude_forecasts", lambda: (insight.merge_claude_forecasts(settings, state, settings.heavy_dir),
                                     "Claude's price forecasts written to the forecast ledger"))
     if due("forecast_grading", R.get("forecast_grading", 360)):
-        do("forecast_grading", insight.job_grade_learn, settings, state, pan, store, settings.heavy_dir)
+        do("forecast_grading", insight.job_grade_learn, settings, state, pan, store, settings.heavy_dir, budget)
     do("conviction", lambda: (lambda n: (n, f"{n} Top conviction"))(insight.apply_conviction(settings, state, sctx, led)))
     if due("ledger", R.get("ledger", 360)):
         do("ledger", lambda: (ledger.grade(led, panel, store), f"{len(led['entries'])} forecasts on record"))

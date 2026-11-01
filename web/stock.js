@@ -198,14 +198,14 @@
     const row = pick && pick.horizons && pick.horizons[state.range];
     const bl = pick && pick.device ? (row ? deviceBlend(pick, fc, state.range) : null) : doc.blend && doc.blend[state.range];
     const cDate = row && (pick.target_dates || {})[state.range];
-    return `<section class="sec"><div class="sec-h"><h2>Forecast</h2><span class="small muted">from the ${U.esc(U.dateFmt(fc.made))} close of ${U.px(fc.anchor)}</span></div>
+    return `<section class="sec"><div class="sec-h"><h2>Forecast</h2><span class="small muted">from the ${U.dateFmt(fc.made)} close of ${U.px(fc.anchor)}</span></div>
       <div class="panel chart-panel">
         <div class="seg compact" role="group" aria-label="Forecast horizon">${HZ.filter(([k]) => fc.horizons[k]).map(([k, l]) => `<button data-range="${k}" aria-pressed="${state.range === k}">${k.toUpperCase()}<span class="sr-only"> (${l})</span></button>`).join("")}</div>
         <div id="fan" class="fan-box"></div>
         <div class="viz-legend"><span><i class="viz-key line" style="--k:var(--ink)"></i>Price</span><span><i class="viz-key band" style="--k:var(--series-1)"></i>Model range (50 / 80 / 90%)</span>${pick ? `<span><i class="viz-key dot" style="--k:var(--series-2)"></i>Claude (10–90%)</span>` : ""}<span class="muted">Ticks: E earnings, Fed, CPI</span></div>
       </div>
       <div class="panel">
-        <div class="hz-title">In ${U.esc(name)}, by ${U.esc(U.dateFmt(h.date))}</div>
+        <div class="hz-title">In ${U.esc(name)}, by ${U.dateFmt(h.date)}</div>
         <div class="kpis">
           <div class="kpi"><span>Likely range (80%)</span><b>${U.pxc(h.q["10"])}–${U.pxc(h.q["90"])}</b>${measured && measured.cov80 != null ? `<small class="kpi-sub">${measured.from === "live" ? "So far" : "Backtest"}: held ${pct0(measured.cov80)} of ${U.num(measured.n)}</small>` : ""}</div>
           <div class="kpi"><span>Middle outcome</span><b>${U.pxc(h.q["50"])}</b></div>
@@ -221,14 +221,14 @@
           <div><span>Touches +10% on the way</span><b>${pct0(touch["+10"])}</b></div><div><span>Touches −10% on the way</span><b>${pct0(touch["-10"])}</b></div>
           <div><span>Typical worst drop from a peak</span><b>${U.pct(-h.mdd_med * 100, 1)}</b></div><div><span>20%+ drop from a peak</span><b>${pct0(h.p_dd20)}</b></div>
         </div>
-        ${big && big.risk_share_3m > 0.04 ? `<p class="riskday">Riskiest day: <b>${U.esc(big.label.replace(" (estimated date)", ""))}, ${U.esc(U.dateFmt(big.date))}</b>${big.estimated ? " (date estimated)" : ""}. It carries ${pct0(big.risk_share_3m)} of the next three months' risk${big.p_low_near != null ? `, and the 3-month low falls within a day or two of it ${pct0(big.p_low_near)} of the time` : ""}.</p>` : ""}
+        ${big && big.risk_share_3m > 0.04 ? `<p class="riskday">Riskiest day: <b>${U.esc(big.label.replace(" (estimated date)", ""))}, ${U.dateFmt(big.date)}</b>${big.estimated ? " (date estimated)" : ""}. It carries ${pct0(big.risk_share_3m)} of the next three months' risk${big.p_low_near != null ? `, and the 3-month low falls within a day or two of it ${pct0(big.p_low_near)} of the time` : ""}.</p>` : ""}
         ${state.range === "3m" && lt.now != null ? timingBar(lt) : ""}
         <p class="small muted">A 40% fall within a year: ${pct0((fc.crash || {}).p_dd40_1y)}, judged from its volatility alone. Nobody can name the day of a peak or a dip; for prices that move like a random walk the high is about as likely near either end of the window, so the app shows probabilities and risk windows instead.</p>
         ${row || bl ? `<h3>Model, Claude and combined</h3>
         <div class="scroll-x"><table class="cmp"><tr><th></th><th>Middle</th><th>80% range</th><th>Higher</th></tr>
-          <tr><td>Model<div class="small muted">${U.esc(U.dateFmt(h.date).replace(/, \d{4}$/, ""))}</div></td><td>${U.pxc(h.q["50"])}</td><td class="nw">${U.pxc(h.q["10"])}–${U.pxc(h.q["90"])}</td><td>${pct0(h.p_up)}</td></tr>
-          ${row ? `<tr><td>Claude${pick.device ? " (this phone)" : ""}${cDate ? `<div class="small muted">${U.esc(U.dateFmt(cDate).replace(/, \d{4}$/, ""))}</div>` : ""}</td><td>${U.pxc(row.median)}</td><td class="nw">${U.pxc(row.low_10)}–${U.pxc(row.high_90)}</td><td>${pct0(row.p_up)}</td></tr>` : ""}
-          ${bl ? `<tr><td>Combined${bl.date ? `<div class="small muted">${U.esc(U.dateFmt(bl.date).replace(/, \d{4}$/, ""))}</div>` : ""}</td><td>${U.pxc(bl.q["50"])}</td><td class="nw">${U.pxc(bl.q["10"])}–${U.pxc(bl.q["90"])}</td><td></td></tr>` : ""}</table></div>
+          <tr><td>Model<div class="small muted">${U.dateFmt(h.date).replace(/, \d{4}$/, "")}</div></td><td>${U.pxc(h.q["50"])}</td><td class="nw">${U.pxc(h.q["10"])}–${U.pxc(h.q["90"])}</td><td>${pct0(h.p_up)}</td></tr>
+          ${row ? `<tr><td>Claude${pick.device ? " (this phone)" : ""}${cDate ? `<div class="small muted">${U.dateFmt(cDate).replace(/, \d{4}$/, "")}</div>` : ""}</td><td>${U.pxc(row.median)}</td><td class="nw">${U.pxc(row.low_10)}–${U.pxc(row.high_90)}</td><td>${pct0(row.p_up)}</td></tr>` : ""}
+          ${bl ? `<tr><td>Combined${bl.date ? `<div class="small muted">${U.dateFmt(bl.date).replace(/, \d{4}$/, "")}</div>` : ""}</td><td>${U.pxc(bl.q["50"])}</td><td class="nw">${U.pxc(bl.q["10"])}–${U.pxc(bl.q["90"])}</td><td></td></tr>` : ""}</table></div>
         ${bl ? `<p class="small muted">Combined: Claude's forecast and the model's for the same date, Claude weighted ${Math.round(bl.w_claude * 100)}% by each one's measured skill (equal until both are graded).</p>` : ""}` : ""}
         <h3>How reliable is this?</h3>
         <p class="small">${live ? `Graded so far at this horizon: ${U.num(live.n)} forecasts. The 80% range held <b>${pct0(live.cov80)}</b> of outcomes (target 80%); direction was right ${pct0(live.hit)} of the time versus ${pct0(live.up)} for "always say up".`
@@ -238,7 +238,7 @@
         <details class="more"><summary>Method, assumptions and the table view</summary>
           <div class="scroll-x"><table class="cmp"><tr><th>Horizon</th><th>5%</th><th>10%</th><th>50%</th><th>90%</th><th>95%</th><th>Higher</th></tr>
             ${HZ.filter(([k]) => fc.horizons[k]).map(([k, l]) => { const z = fc.horizons[k]; return `<tr><td>${l}</td><td>${U.pxc(z.q["05"])}</td><td>${U.pxc(z.q["10"])}</td><td>${U.pxc(z.q["50"])}</td><td>${U.pxc(z.q["90"])}</td><td>${U.pxc(z.q["95"])}</td><td>${pct0(z.p_up)}</td></tr>`; }).join("")}</table></div>
-          <p class="small muted">${U.num(fc.paths)} simulated paths that resample this stock's own past daily shocks (keeping its fat tails), scaled by its current volatility of ${U.pct(fc.vol_now * 100, 0, false)} a year (long-run ${U.pct(fc.vol_lr * 100, 0, false)}), with extra risk on earnings days (${U.num(fc.earn_mult, 1)}× a normal day${fc.earn_samples ? `, from its last ${U.num(fc.earn_samples)} reports` : ", a typical value"}), Fed decisions and CPI releases. Drift ${U.pct(fc.drift_ann * 100, 1)} a year: cash rate plus beta ${U.num(fc.beta, 2)} × a 5% equity premium${fc.div_yield ? `, minus its ${U.pct(fc.div_yield * 100, 1, false)} dividend yield (prices drop by the dividend)` : ""}${fc.tilt && fc.tilt.ret ? `, plus a learned nudge of ${U.pct(fc.tilt.ret * 100, 1)} over the next ${U.num(fc.tilt.days)} sessions` : ""}. The middle outcome sits below the average one for volatile stocks: that's how compounding works, not pessimism.</p></details>
+          <p class="small muted">${U.num(fc.paths)} simulated paths that resample this stock's own past daily shocks (keeping its fat tails), scaled by its current volatility of ${U.pct(fc.vol_now * 100, 0, false)} a year (long-run ${U.pct(fc.vol_lr * 100, 0, false)}), with extra risk on earnings days (${U.num(fc.earn_mult, 1)}× a normal day${fc.earn_samples ? `, from its last ${U.num(fc.earn_samples)} reports` : ", a typical value"}), Fed decisions and CPI releases. Drift ${U.pct(fc.drift_ann * 100, 1)} a year: cash rate plus beta ${U.num(fc.beta, 2)} × a 5% equity premium${fc.div_yield ? `, minus its ${U.pct(fc.div_yield * 100, 1, false)} dividend yield (prices drop by the dividend)` : ""}${fc.tilt && fc.tilt.ret ? `, plus a learned nudge of ${U.pct(fc.tilt.ret * 100, 1)} over the next ${U.num(fc.tilt.days)} sessions${(fc.tilt.parts || []).filter((x) => x && x.label && x.h_ret).length ? ` (mainly ${U.esc(fc.tilt.parts.filter((x) => x && x.label && x.h_ret).slice(0, 2).map((x) => x.label.charAt(0).toLowerCase() + x.label.slice(1)).join(" and "))}; see Records → What it has learned)` : ""}` : ""}. The middle outcome sits below the average one for volatile stocks: that's how compounding works, not pessimism.</p></details>
       </div></section>`;
   }
 
@@ -289,7 +289,7 @@
         </table>
         ${U.sourcesList(pick.sources)}
         <div class="btns">${btn}</div><div id="devfc-status" class="small muted"></div>
-        <p class="small muted">Graded from the close of ${U.esc(U.dateFmt(pick.ref_date))}, the first session after it was written, so after-hours news can't flatter it.</p>
+        <p class="small muted">Graded from the close of ${U.dateFmt(pick.ref_date)}, the first session after it was written, so after-hours news can't flatter it.</p>
       </div></section>`;
   }
 
@@ -368,7 +368,7 @@
       </table>
       ${dcf ? `<p class="small">${dcf.growth != null ? `The price assumes free cash flow grows about <b>${U.pct(dcf.growth * 100, 0)} a year for 10 years</b>, then ${Math.round(dcf.g_term * 100)}% forever, at a ${Math.round(dcf.r * 100)}% required return (reverse DCF).` : dcf.above ? "The price assumes free cash flow grows more than 100% a year for a decade: priced for something extraordinary." : "The price implies shrinking cash flows: priced for decline."}</p>` : ""}
       ${cf && cf.reasoning ? `<p class="small"><b>Claude's view${cf.label ? `: ${U.esc(cf.label.toLowerCase())}` : ""}.</b> ${U.esc(cf.reasoning)}</p>` : ""}
-      <p class="small muted">Trailing-12-month figures from the company's SEC filings (period to ${U.esc(U.dateFmt(v.period_end))}, ${U.esc(v.method || "")})${v.price_date ? `, at the ${U.esc(U.dateFmt(v.price_date))} close` : ""}. Valuation is a poor timing tool: expensive stocks can stay expensive for years.</p>
+      <p class="small muted">Trailing-12-month figures from the company's SEC filings (period to ${U.dateFmt(v.period_end)}, ${U.esc(v.method || "")})${v.price_date ? `, at the ${U.dateFmt(v.price_date)} close` : ""}. Valuation is a poor timing tool: expensive stocks can stay expensive for years.</p>
     </div></section>`;
   }
   const row = (k, v) => (v == null || v === "—" ? "" : `<tr><td>${window.SMR.u.esc(k)}</td><td>${v}</td></tr>`);
@@ -399,7 +399,7 @@
     const link = (u, s) => (U.safeUrl(u) ? `<a href="${U.esc(U.safeUrl(u))}" target="_blank" rel="noopener noreferrer">${s}</a>` : s);
     return `<section class="sec"><h2>News</h2>
       ${cl.length ? `<div class="panel ai"><h3>Claude's read of the news</h3><ul class="news">${cl.map((x) => `<li><span class="nd">${U.esc(/^\d{4}-\d{2}-\d{2}$/.test(x.date || "") ? U.dateFmt(x.date) : x.date)}</span><div>${link(x.url, `<b>${U.esc(x.headline)}</b>`)}<div class="small muted">${U.esc(x.why_it_matters)}</div></div></li>`).join("")}</ul></div>` : ""}
-      ${fl.length ? `<div class="panel"><h3>Company filings (8-K)</h3><ul class="news">${fl.slice(0, 8).map((f) => { const its = f.items || []; return `<li class="${U.esc(f.sev || "")}"><span class="nd">${U.esc(U.dateFmt(f.date))}</span><div>${link(f.url, `<b>${f.sev === "red" ? "⚑ " : ""}${U.esc(f.title)}</b>`)}${its.length > 1 ? `<div class="small muted">${its.slice(1).map((i) => U.esc(i.label)).join("; ")}</div>` : ""}</div></li>`; }).join("")}</ul>
+      ${fl.length ? `<div class="panel"><h3>Company filings (8-K)</h3><ul class="news">${fl.slice(0, 8).map((f) => { const its = f.items || []; return `<li class="${U.esc(f.sev || "")}"><span class="nd">${U.dateFmt(f.date)}</span><div>${link(f.url, `<b>${f.sev === "red" ? "⚑ " : ""}${U.esc(f.title)}</b>`)}${its.length > 1 ? `<div class="small muted">${its.slice(1).map((i) => U.esc(i.label)).join("; ")}</div>` : ""}</div></li>`; }).join("")}</ul>
         <p class="small muted">Official announcements filed with the SEC, item by item.</p></div>` : ""}
       ${hl.length ? `<div class="panel"><h3>Headlines</h3><ul class="news">${hl.map((h) => `<li><span class="nd">${U.esc(U.ago(h.seen))}</span><div>${link(h.url, U.esc(h.title))}<div class="small muted">${U.esc(h.domain || "")}</div></div></li>`).join("")}</ul>
         <p class="small muted">Headlines via the <a href="https://www.gdeltproject.org/" target="_blank" rel="noopener noreferrer">GDELT Project</a>; reputable outlets first. Read the source before acting.</p></div>` : ""}
@@ -411,5 +411,110 @@
     return evs.length ? `<section class="sec"><h2>Smart-money moves</h2><div class="rows">${evs.slice(0, 12).map(U.card).join("")}</div></section>` : "";
   }
 
-  window.SMRStock = { render, load, devFor, devAll };
+  // ------------------------------------------------------------------ the list of every stock with a forecast
+  const list = { q: "", sort: "ticker", data: null, version: null, shown: null, limit: 150, html: new Map() };
+  async function loadList() {
+    const S = window.SMR.data(), v = S.version || Date.now();
+    if (list.data && list.version === v) return list.data;
+    const r = await fetch(`data/forecasts.json?v=${v}`, { cache: "no-store" });
+    if (r.status === 404) return { stocks: [], n: 0 };
+    if (!r.ok) {
+      let off = false;
+      if (r.status === 503) { try { off = !!(await r.json()).offline; } catch { /* a server error page */ } }
+      const e = new Error(off ? "offline, not saved" : `HTTP ${r.status}`); e.offline = off; throw e;
+    }
+    const d = await r.json();
+    if (r.headers.get("X-SMR-From-Cache")) { d._saved = true; return d; }     // a saved copy: fetched again next time
+    list.data = d; list.version = v;
+    return d;
+  }
+  const chg = (row, k) => (row[k] && row[k].mid && row.close ? row[k].mid / row.close - 1 : null);
+  const SORTS = { ticker: ["Ticker", (a, b) => a.t.localeCompare(b.t)],
+    up3: ["3-month outlook", (a, b) => (chg(b, "m3") ?? -9) - (chg(a, "m3") ?? -9)],
+    pup: ["Chance up (1 month)", (a, b) => ((b.m1 || {}).up ?? -1) - ((a.m1 || {}).up ?? -1)],
+    risk: ["Widest range", (a, b) => (((b.m1 || {}).hi / (b.m1 || {}).lo) || 0) - (((a.m1 || {}).hi / (a.m1 || {}).lo) || 0)] };
+  function renderList(view) {
+    const my = ++seq;
+    onScreen = null;
+    const S = window.SMR.data(), v = S.version || Date.now();
+    // coming Back to the list from a stock: the same place in it (only then; a new visit starts at the top)
+    const st = history.state || {}, back = typeof st.fcScroll === "number" ? st.fcScroll : null;
+    if (back != null) { try { history.replaceState({ ...st, fcScroll: null }, ""); } catch { /* not allowed here */ } }
+    view.innerHTML = `<div class="pagebar"><button class="back" data-act="back">‹ Back</button></div>
+      <h1 class="page-title">All forecasts</h1><div id="fc-list"></div>`;
+    const place = () => { if (back != null) requestAnimationFrame(() => window.scrollTo(0, back)); };
+    if (list.data) drawList(list.data);           // what's here already, at once (a newer version replaces it below)
+    else document.getElementById("fc-list").innerHTML = `<p class="muted small loading">Loading the list…</p>`;
+    if (list.data && list.version === v) { place(); return; }
+    loadList().then((d) => {
+      if (my !== seq) return;
+      const y = window.scrollY;
+      drawList(d);
+      if (back != null) window.scrollTo(0, back); else window.scrollTo(0, y);
+    }).catch((err) => {
+      const box = document.getElementById("fc-list");
+      if (my === seq && box && !list.data) box.innerHTML = `<div class="notice">${err.offline || !navigator.onLine ? "You're offline and the list wasn't saved for offline use yet." : `Couldn't load the list (${window.SMR.u.esc(err.message)}).`}</div>`;
+    });
+  }
+  // The search box and sort menu are drawn once; typing only redraws the rows (so phone keyboards that compose
+  // words aren't interrupted), a moment after the last key.
+  function drawList(d) {
+    const U = window.SMR.u, box = document.getElementById("fc-list");
+    if (!box) return;
+    if (list.shown !== d) { list.shown = d; list.html = new Map(); }      // the rows drawn for this copy of the list
+    const all = (d && d.stocks) || [];
+    if (!all.length) {
+      box.innerHTML = `<div class="panel"><p class="small">${d && d.enabled === false
+        ? "Price forecasts are switched off in this app's settings (forecast.enabled in config.yaml), so there's no list."
+        : "No forecasts yet. The app builds one for every stock in the feed once it has about six months of that stock's prices; the first ones appear within a day of setup (More → Data shows the price history filling in)."}</p></div>`;
+      return;
+    }
+    if (!box.querySelector("#fc-q")) {
+      box.innerHTML = `<p class="page-sub" id="fc-sub"></p>
+        <div class="toolbar"><input class="search" id="fc-q" type="search" placeholder="Ticker or company" aria-label="Search the forecasts by ticker or company" value="${U.esc(list.q)}" autocomplete="off">
+          <select class="search" id="fc-sort" aria-label="Sort by">${Object.entries(SORTS).map(([k, [l]]) => `<option value="${k}"${list.sort === k ? " selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div class="fc-list" id="fc-rows"></div>
+        <p class="disc">The middle outcome is as likely to be beaten as missed; the 80% range should hold the price about 80% of the time (graded on the Records tab). Research, not personal financial advice.</p>`;
+      const qi = box.querySelector("#fc-q");
+      let timer = null;
+      const later = () => { clearTimeout(timer); timer = setTimeout(() => { if (list.q !== qi.value) { list.q = qi.value; list.limit = 150; drawRows(); } }, 150); };
+      qi.addEventListener("input", (e) => { if (!e.isComposing) later(); });
+      qi.addEventListener("compositionend", later);
+      box.querySelector("#fc-sort").addEventListener("change", (e) => { list.sort = e.target.value in SORTS ? e.target.value : "ticker"; drawRows(); });
+      box.querySelector("#fc-rows").addEventListener("click", (e) => {
+        if (e.target.closest("a.fc-row")) { try { history.replaceState({ ...(history.state || {}), fcScroll: window.scrollY }, ""); } catch { /* not allowed here */ } }
+        if (e.target.closest("[data-fc-more]")) { list.limit += 150; drawRows(); }
+      });
+    }
+    drawRows();
+  }
+  function rowHtml(r, latest) {
+    if (list.html.has(r.t)) return list.html.get(r.t);
+    const U = window.SMR.u, m1 = r.m1 || {}, c3 = chg(r, "m3");
+    const pc = (x) => (x == null ? "—" : U.pct(x * 100, 0, false));
+    const h = `<a class="fc-row" href="#/ticker/${encodeURIComponent(r.t)}"><div class="grow"><b>${U.esc(r.t)}</b> <span class="small muted">${U.esc(U.niceName(r.name || ""))}</span>
+        <div class="small muted">1 month: ${U.pxc(m1.lo)}–${U.pxc(m1.hi)} (80% range) · ${pc(m1.up)} chance it rises${r.claude ? " · Claude too" : ""}${r.made && r.made !== latest ? ` · from the ${U.dateFmt(r.made)} close` : ""}</div>
+        <div class="chips-row">${ratingChip(r.rating ? { rating: r.rating } : null)}${valChip(r.val ? { label: r.val } : null)}${bubChip(r.bubble ? { level: r.bubble } : null)}</div></div>
+        <div class="quote"><div class="small muted">3-month middle</div><div class="${c3 == null ? "" : c3 >= 0 ? "up" : "down"}"><b>${c3 == null ? "—" : U.pct(c3 * 100, 1)}</b></div><div class="small muted">from ${U.px(r.close)}</div></div></a>`;
+    list.html.set(r.t, h);
+    return h;
+  }
+  function drawRows() {
+    const U = window.SMR.u, d = list.shown, el = document.getElementById("fc-rows"), sub = document.getElementById("fc-sub");
+    if (!el || !d) return;
+    const all = d.stocks || [];
+    const latest = all.reduce((m, r) => (String(r.made || "") > m ? String(r.made) : m), "");
+    const older = all.filter((r) => r.made && r.made !== latest).length;
+    if (sub) {
+      sub.innerHTML = `Every stock the app forecasts: ${U.num(all.length)}, from the ${U.dateFmt(latest)} close${older ? ` (${U.num(older)} from an earlier one: their latest prices were late)` : ""}. Tap one for its chart, peaks and dips, valuation and news.${d._saved ? ` <span class="muted">The network was slow or offline, so this is the copy saved on this phone.</span>` : ""}`;
+    }
+    const q = list.q.trim().toUpperCase();
+    const rows = all.filter((r) => !q || r.t.includes(q) || String(r.name || "").toUpperCase().includes(q)).sort(SORTS[list.sort][1]);
+    const more = rows.length - list.limit;
+    el.innerHTML = rows.slice(0, list.limit).map((r) => rowHtml(r, latest)).join("")
+      + (more > 0 ? `<button class="btn" data-fc-more="1">Show ${U.num(Math.min(150, more))} more (${U.num(more)} not shown)</button>` : "")
+      || `<p class="small muted">No stock matches “${U.esc(list.q)}”.</p>`;
+  }
+
+  window.SMRStock = { render, renderList, load, devFor, devAll };
 })();

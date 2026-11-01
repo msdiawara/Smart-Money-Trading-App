@@ -561,6 +561,7 @@
     const lists = (S.ideas && S.ideas.lists) || {};
     view.innerHTML = `<h1 class="page-title">Ideas &amp; market</h1>
       <p class="page-sub">The app's strongest calls, the AI-bubble gauge, the market backdrop and Claude's brief. Each screen shows its measured record.</p>
+      <div class="menu"><a href="#/forecasts"><b>All forecasts</b><span>every stock with a price forecast, searchable</span></a></div>
       ${convictionCard()}${aiGaugeCard()}
       <section class="sec"><h2>Market</h2>${marketCard()}${briefCard()}</section>
       ${Object.entries(lists).map(([k, l]) => `<div class="panel section"><h3>${esc(l.title)}</h3><p class="small muted" style="margin:6px 0 0">${esc(l.about)}</p>${screenTrack(k, l.track, l.related)}
@@ -832,6 +833,7 @@
         <a href="#/status"><b>Data, sources &amp; self-check</b><span>${issues ? `${issues} to look at` : "all clear"}</span></a>
         <a href="#/size"><b>Sizing rules</b><span>position-size ceiling</span></a>
         <a href="#/ask"><b>Claude settings</b><span>API key, model, effort</span></a>
+        <a href="#/forecasts"><b>All forecasts</b><span>every stock with a price forecast</span></a>
         <a href="#/leaders"><b>Records</b><span>forecast accuracy, win rates</span></a></div></section>
       <section class="sec"><h2>About</h2><div class="panel"><p class="small">Smart Money Radar follows disclosed trades by insiders, funds, activists, Congress and active ETFs, then adds forecasts, valuation, bubble risk and news for each stock. Every probability it shows is written down and graded in the open. Research, not personal financial advice.</p>
         <p class="small muted">Headlines: GDELT Project. Filings: SEC EDGAR. Font: IBM Plex Sans (SIL Open Font License).</p></div></section>`;
@@ -898,7 +900,7 @@
     const [, name, arg] = h.match(/^#\/([^/]+)\/?(.*)$/) || [, "feed", ""];
     document.querySelectorAll(".tabs a").forEach((a) => {
       const on = a.dataset.tab === name || (name === "event" || name === "ticker" || name === "person") && a.dataset.tab === "feed" ||
-        (name === "size" || name === "status") && a.dataset.tab === "more";
+        (name === "size" || name === "status") && a.dataset.tab === "more" || name === "forecasts" && a.dataset.tab === "ideas";
       a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     });
@@ -906,6 +908,7 @@
     if (!S.feed.length && !S.meta) return;
     S.renderedVersion = S.version;
     ({ feed: renderFeed, event: () => renderEvent(id), ticker: () => renderTicker(id), person: () => renderPerson(id), leaders: renderLeaders, ideas: renderIdeas,
+      forecasts: () => (window.SMRStock && window.SMRStock.renderList ? window.SMRStock.renderList(view) : renderIdeas()),
       watch: renderWatch, size: renderSize, status: renderStatus, ask: renderAsk, more: renderMore }[name] || renderFeed)();
     if (name !== "feed" && !keepScroll) window.scrollTo(0, 0);
   }
@@ -979,7 +982,7 @@
   // auto-refresh: check for a new version every 60 s while visible, and when the app comes back to the foreground
   async function poll() {
     if (document.visibilityState !== "visible" || !(await loadAll(true))) return;
-    if (viewName() === "ticker" || viewName() === "leaders") toast("New data: tap “Updated” to refresh this page");   // don't redraw mid-read
+    if (["ticker", "leaders", "forecasts"].includes(viewName())) toast("New data: tap “Updated” to refresh this page");   // don't redraw mid-read
     else refreshView();
   }
   setInterval(poll, 60000);

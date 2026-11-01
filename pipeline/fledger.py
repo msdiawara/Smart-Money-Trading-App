@@ -31,15 +31,20 @@ from pathlib import Path
 import numpy as np
 
 from .forecast import HORIZONS, TAUS, last_complete_session, split_like
+from .prices import BENCH
 from .quant import clustered_interval
 from .util import now_et, read_json, write_json
 
 PATH = "forecast_ledger.json.gz"
 HMAP = dict(HORIZONS)
 SRCS = ("quant", "claude", "blend", "quant_bt")      # quant_bt: walk-forward backtest of the model on past data
-KEEP_GRADED = 15000                 # hard cap per source and horizon
-PER_DAY = {"quant": 30, "quant_bt": 40}  # sampled records kept per forecast day (others: all)
+KEEP_GRADED = 40000                 # hard cap per source and horizon (whole months are dropped when it binds)
+KEEP_GRADED_BY_H = {"21": 60000}    # the 1-month records: four years of 50 a day fit
+PER_DAY = {"quant": 50, "quant_bt": 150}  # sampled records kept per forecast day (others: all; the S&P 500's always)
 KEEP_DAYS = 460
+# the 1-month records the signal learner tests on: about four years of months (the test's power grows with them);
+# the 3-month ones: two years
+KEEP_DAYS_BY_H = {"21": 1500, "63": 760}
 
 
 def load(heavy_dir: Path) -> dict:
@@ -61,13 +66,15 @@ def _hash(t: str, made: str) -> int:
 
 
 def compact(L: dict, today: dt.date | None = None) -> None:
-    """Keep the graded records the learning needs: ~15 months, a fixed random sample per day (the same stocks
-    at every horizon), and a hard cap. The monthly aggregates are not touched: they count everything."""
+    """Keep the graded records the learning needs: ~15 months (about four years for the 1-month records the signal
+    learner uses, two for the 3-month ones), a fixed random sample per day (the same stocks at every horizon, plus
+    the S&P 500), and a hard cap. The monthly aggregates are not touched: they count everything."""
     today = today or now_et().date()
-    cut = (today - dt.timedelta(days=KEEP_DAYS)).isoformat()
     for src, by_h in (L.get("graded") or {}).items():
         k = PER_DAY.get(src)
         for h, rows in list(by_h.items()):
+            # whole months at a time, so the learners' stored month-by-month test results stay valid within a month
+            cut = (today - dt.timedelta(days=KEEP_DAYS_BY_H.get(str(h), KEEP_DAYS))).replace(day=1).isoformat()
             rows = [r for r in rows if (r.get("made") or "") >= cut]
             if k:
                 by_day: dict[str, list] = {}
@@ -76,12 +83,25 @@ def compact(L: dict, today: dt.date | None = None) -> None:
                 rows = []
                 for d in sorted(by_day):
                     day = by_day[d]
-                    if len(day) > k:
-                        day = sorted(day, key=lambda r: _hash(r["t"], d))[:k]
+                    if len(day) > k:            # the S&P 500's own record is the market's surprise that day: kept
+                        bench = [r for r in day if r.get("t") == BENCH]
+                        day = bench + sorted([r for r in day if r.get("t") != BENCH], key=lambda r: _hash(r["t"], d))[:k]
                     rows.extend(day)
             else:
                 rows.sort(key=lambda r: r["made"])
-            by_h[h] = rows[-KEEP_GRADED:]
+            cap = KEEP_GRADED_BY_H.get(str(h), KEEP_GRADED)
+            if len(rows) > cap:                # oldest whole months first: no day is split, stored results stay valid
+                per_month: dict[str, int] = {}
+                for r in rows:
+                    per_month[r["made"][:7]] = per_month.get(r["made"][:7], 0) + 1
+                drop, n = set(), 0
+                for mo in sorted(per_month):
+                    if len(rows) - n <= cap:
+                        break
+                    drop.add(mo)
+                    n += per_month[mo]
+                rows = [r for r in rows if r["made"][:7] not in drop]
+            by_h[h] = rows
 
 
 def _week(d: dt.date) -> str:
@@ -354,12 +374,17 @@ def _finish(L: dict, fid: str, e: dict, r: float, dd: float, delisted: bool, tod
 
 
 def add_backtest(L: dict, t: str, made: str, h: int, lq: list[float], lq_raw: list[float], pup: float,
-                 naive: list[float], r: float, dd: float, today: dt.date, p0: float, p1: float, end: dt.date) -> bool:
-    """A backtest forecast is graded at once (its outcome is already history); same scoring as live ones."""
+                 naive: list[float], r: float, dd: float, today: dt.date, p0: float, p1: float, end: dt.date,
+                 feats: dict | None = None) -> bool:
+    """A backtest forecast is graded at once (its outcome is already history); same scoring as live ones.
+    `feats`: the signal features known on that past date (price-based only), so the signal learner can use
+    the backtest from the first day."""
     fid = f"quant_bt:{t}:{h}:{made}"
     if fid in L["pending"] or fid in L.setdefault("bt_seen", {}):
         return False
     e = {"t": t, "src": "quant_bt", "h": h, "made": made, "lq": lq, "lqr": lq_raw, "pup": pup, "nv": naive}
+    if feats:
+        e["f"] = {k: round(float(v), 4) for k, v in feats.items() if v is not None and math.isfinite(float(v))}
     L["pending"][fid] = e
     _finish(L, fid, e, r, dd, False, today, p0, p1, end)
     L["bt_seen"][fid] = 1
@@ -403,11 +428,12 @@ def summarize(rows: list[dict], h: int) -> dict:
     return out
 
 
-def metrics(L: dict, today: dt.date | None = None, recent_days: int = 120) -> dict:
+def metrics(L: dict, today: dt.date | None = None, recent_days: int = 120, ci_days: int = 460) -> dict:
     """Per source and horizon: everything graded (from the monthly aggregates), the recent window (from the
     graded records, with honest clustered intervals), and the month-by-month trend."""
     today = today or now_et().date()
     cut = (today - dt.timedelta(days=recent_days)).isoformat()
+    cut_ci = (today - dt.timedelta(days=ci_days)).isoformat()
     out: dict = {"pending": len(L["pending"]), "void": L.get("void") or {}, "by": {}}
     pend: dict[str, int] = {}
     for e in L["pending"].values():
@@ -431,7 +457,9 @@ def metrics(L: dict, today: dt.date | None = None, recent_days: int = 120) -> di
             rows = L["graded"].get(src, {}).get(h, [])
             recent = [r for r in rows if r["made"] >= cut]
             n = tot["n"]
-            ci = _rate(rows, "in80", int(h))      # clustered interval from the kept records (overlapping windows)
+            # clustered interval (overlapping windows) from the last ~15 months of kept records: the 1-month ones are
+            # kept for four years, made under calibrations long since replaced
+            ci = _rate([r for r in rows if r["made"] >= cut_ci], "in80", int(h))
             out["by"].setdefault(src, {})[names.get(h, h)] = {
                 "h": int(h),
                 "all": {"n": n, "cov50": tot["in50"] / n if n else None, "cov80": tot["in80"] / n if n else None,

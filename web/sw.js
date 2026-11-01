@@ -3,7 +3,7 @@
    saved answers 503 (not an empty file), so the app says "not saved for offline use" instead of "no data". A data
    file answered from the saved copy carries an X-SMR-From-Cache header, so the app can say it's showing a saved
    copy and check again next time. Bump VERSION when the shell changes. */
-const VERSION = "v8";
+const VERSION = "v9";
 const SHELL = `smr-shell-${VERSION}`;
 const DATA = "smr-data-v1";
 const TIMEOUT_MS = 3500;

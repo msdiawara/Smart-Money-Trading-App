@@ -224,8 +224,10 @@ when the 3-month low is likely to land; and a table comparing the model, Claude 
 3-month weekly and 1-year monthly (so long, overlapping forecasts don't swamp the record), each with the features known at its
 anchor close (nothing filed or published after that close). Entries are never revised. Each is graded at its target date's
 close; a stock that stops trading is graded to its last close; one never priced is voided. Every graded forecast counts in the
-accuracy figures; for the learning, a fixed random sample of 30 per day and horizon is kept for about 15 months (outcomes on
-one day move together, so more of the same day adds little), which is what lets calibration and the tilt test run at all.
+accuracy figures; for the learning, a fixed random sample of 50 per day and horizon (150 for the backtest) is kept for about
+15 months, the 3-month ones for two years and the 1-month ones (what the signal learner tests on) for about four years. The
+S&P 500's own forecasts are always kept: they measure the market's surprise each day. Outcomes on one day move together, so
+more of the same day adds little; more months is what makes the tests below more sensitive.
 
 **How accuracy is measured**, per horizon, all-time and over the last 3 months, with a monthly trend chart:
 | Measure | What it tells you | What "good" is |
@@ -240,38 +242,114 @@ months would beat every fund on record by a wide margin; the published evidence 
 50%. Coverage and skill are the measures that can honestly reach their targets, and they're what the learning loop optimises.
 
 **How it learns from its mistakes:**
-1. *Calibration:* per horizon, a width correction (scale) and centre correction (shift) estimated from the last 200 days of
-   graded forecasts. It starts from the walk-forward backtest (item 5) and switches to live grades once there are 200+ from 20+
-   different days. Evidence is counted in days, not rows: the correction is shrunk toward "no change" by days/(days+20); the
-   scale stays within 0.6–2.0 and the shift within ±¼ of a standard deviation. The accuracy page shows its before → after
-   coverage on the most recent 30% of days, with the correction fitted only on forecasts whose outcome date (the horizon's
-   number of trading sessions later, holidays included) falls on or before the first of those days, so no fitted outcome
-   overlaps a tested one (a hold-out test, not the fit grading itself), and says which source it's using. The stock page shows
-   how often the 80% range has held at that horizon (live grades, or the backtest until there are enough) and warns that the
-   ranges read too narrow or too wide only when an interval that allows for overlapping forecasts excludes 80% and rests on at
-   least three independent periods; the warning quotes that interval's own rate.
-2. *Signal tilts:* each forecast records signal features as of its anchor close (the stock's signal score and direction, 12-1
-   month momentum, 1-month reversal, valuation at that close, Claude's stance as known then, insider buying minus selling, bubble
-   score). A ridge regression on graded 1-month outcomes (measured against the median *before* any tilt, so an applied tilt
-   can't feed back into its own target) proposes a small nudge, used only if a walk-forward test passes: refit each month on
-   earlier months and tested on the next, the average monthly gain must be positive with t ≥ 2.5 (standard error inflated by √2
-   because neighbouring months overlap; 2.5 because the test is repeated weekly), above 0.2%, positive over the last 3 months,
-   and passed at two weekly checks in a row. Once on, it switches off when t falls below 1.5 or the last 3 months turn
-   negative. It is applied only over the 21 sessions it was tested on, never extrapolated to a year, and capped. On simulated
-   data, a single weekly test passed in 0 of 40 worlds with no real signal and found a planted signal in 20 of 20.
-3. *Blend weights* between the model and Claude follow their skill on the same forecasts (section 8).
-4. *Claude's post-mortems:* up to 2 a day, Claude reviews one of its biggest recent misses (the outcome outside its 90% range)
+1. *Calibration:* per horizon, a width correction (scale) and centre correction (shift) learned from graded forecasts over the
+   kept history (about 15 months). It starts from the walk-forward backtest (item 6) and switches to live grades once there are
+   200+ from 20+ different days spanning at least three independent periods (so it doesn't switch off while the first live
+   months come in). It corrects lasting misfit, not this month's volatility, which the model already tracks.
+   Forecasts made in the same month share most of their outcome window (and every stock shares the market's moves), so
+   evidence is counted in independent months (or horizons, if longer), counted from the first forecast's date so the count
+   grows steadily rather than flipping as the window moves: the scale is shrunk toward "no change" by
+   months/(months+6) and the shift, for which a past market move is weak evidence, by months/(months+60); the scale stays
+   within 0.6–2.0 and the shift within ±¼ of a standard deviation. A hold-out test decides whether it's used at all: a
+   correction fitted only on forecasts whose outcome date (the horizon's number of trading sessions later, holidays included)
+   falls on or before the newest 30% of days must score at least as well on those days as no correction (pinball loss of the
+   10th, 50th and 90th percentiles); otherwise it is held back and shown as "held". The accuracy page shows that test's before
+   → after coverage and says which source it's using. The stock page shows how often the 80% range has held at that horizon
+   (live grades, or the backtest until there are enough) and warns that the ranges read too narrow or too wide only when an
+   interval that allows for overlapping forecasts excludes 80% and rests on at least three independent periods; the warning
+   quotes that interval's own rate.
+2. *The signal learner (machine learning: a competition between algorithms):* each forecast records the signals known at its
+   anchor close: from prices and volumes, 12-1 month momentum and last month's and last week's moves (all relative to the
+   S&P 500), the distance from the 52-week high, recent volatility, how it compares with the stock's usual level and with a
+   month ago, last month's largest daily move, beta and trading volume; and the smart-money signal score and direction,
+   valuation, Claude's stance as known then, insider buying minus selling and the bubble score.
+   *What it predicts:* how a stock ends up relative to the other stocks forecast the same day. Each 1-month error against
+   the median *before* any nudge (so a nudge can't feed back into its own target) has the stock's beta times the S&P 500's
+   own error that day taken out, then the day's average. No stock-level signal can predict the market's move, and taking
+   it out stops beta from "learning" one period's rally.
+   *The candidates:* ridge regression (linear; its shrinkage fades as evidence grows, keeping about months/(months+6) of a
+   standardised weight); gradient-boosted decision trees (shallow and heavily regularised: 60 rounds of depth-3 trees,
+   leaves of at least 3% of the data, half the signals considered per split); a neural network (hidden layers of 32 and 16,
+   weight decay, averaged over three random starts); and the average of the three. Trees and the network can find
+   interactions a linear model can't (a signal that matters only for volatile stocks, say), but they also have more room
+   to fit noise. Gu, Kelly & Xiu (2020) found trees and networks ahead of linear models using 60 years of data on about
+   30,000 stocks; this app's record is a few years of a few hundred stocks, where the simpler model often wins. No single
+   algorithm is best for every data set, so the app tests them on its own record.
+   *The test (weekly, on forecasts never seen in fitting):* walking forward a month at a time, every candidate is fitted
+   only on forecasts whose outcomes were known before that month began (a gap the length of the horizon). It is then
+   scored on that month as it would be used: predictions centred on the day's average and capped. The algorithm *used*
+   for a month is the one with the best record on the months before it, so choosing the winner is itself tested on unseen
+   months. That record must meet all of these:
+   * at least 6 test months, with an average monthly error reduction above 0.2%;
+   * t of at least 2.5, or the stricter 99.5% point of Student's t when test months are few (4.0 with 6 months, 3.1 with
+     12, 2.8 with 30), with the standard error inflated by √2 because neighbouring months overlap;
+   * a positive last 6 months;
+   * two weekly passes in a row, the second including a newly completed month.
+
+   Once on, it switches off when t falls below 1.5 or the last 6 months turn negative. It is paused if its weekly re-test
+   hasn't run for three weeks. The algorithm put in use is the one with the best average over all test months, refit on
+   the whole record. It learns from live forecasts and, from the first day, from the walk-forward backtest, whose rows
+   carry the price and volume signals as they stood on each past date (the rest weren't recorded then and count as
+   missing). Missing values sit at the average when fitting and when used; trees use them directly.
+   *How it's used:* the nudge is the model's prediction minus its average over the stocks the app follows that day, so it
+   moves stocks against each other, never the whole market. It is capped at a quarter of the typical 1-month error and
+   applied over the 21 sessions it was tested on, never extrapolated to a year. Models learned under older signal
+   definitions are never used. The stock page names the signals behind a nudge, and Records → Forecasts shows each
+   algorithm's test score, its t and which one is in use.
+3. *The range learner (calibration that depends on the stock's situation):* item 1 stretches every stock's range alike.
+   This learner tests whether the right stretch depends on where the stock stands: volatility rising or falling against
+   its usual level, a recent big move, an earnings report inside the window, distance from its high, liquidity or beta.
+   Gradient-boosted trees learn the typical (log) stretch needed from those signals. One constant then turns it into the
+   80th percentile; it is computed on forecasts the trees weren't fitted on (three blocks of dates, with a horizon-length
+   gap), since in-sample trees look too good and the ranges would come out too narrow. Per horizon, it's used only if it
+   lowers the 10th/50th/90th pinball loss by at least 0.5% against the single stretch, scored on the newest 30% of days
+   by a version fitted only on older forecasts (median shift included); once on, it stays on while it does no worse than
+   the single stretch, so ranges don't flip week to week. It needs 1,000+ graded forecasts over 6+ independent periods,
+   from live grades once there are that many and from the backtest until then. Its stretch is shrunk toward 1 like the
+   single one and kept within 0.6–2.0.
+4. *Blend weights* between the model and Claude follow their skill on the same forecasts (section 8), trusted in proportion to
+   the independent months graded: months/(months+10).
+5. *Claude's post-mortems:* up to 2 a day, Claude reviews one of its biggest recent misses (the outcome outside its 90% range)
    with what actually happened, names the cause and the range advice from fixed lists, and writes a one-line note. Its later
    forecasts see only the patterns that at least two post-mortems agree on (for example "earnings gap, ranges wider: 3 times"),
    built from those fixed lists. The free-text notes (stripped of links and tickers, and rejected if they read like
    instructions) are shown on the Records tab but never fed back into a prompt, so one planted web page can't steer later
    forecasts. The measured record decides how much its forecasts count. A forecast stopped by the daily budget isn't counted
    as a failure.
-5. *Walk-forward backtest:* the model re-run at 40 past dates (every 10 sessions) on a sample of up to 150 stocks that were
-   liquid *on each date*, including ones that later delisted (so it isn't flattered by survivors), with only what was known
-   then: prices, beta, Fed and CPI dates, and earnings dates (from filings, or for stocks without a filing record, estimated from
-   the volume spikes that mark earnings days). Accuracy is visible from the first day and calibration has data to start from.
-   It's labelled "Backtest" and never mixed with live grades.
+6. *Walk-forward backtest:* the model re-run once a week (each week's last session, up to 120 weeks back) on a sample of up
+   to 150 stocks that were liquid *on each date*, including ones that later delisted (so it isn't flattered by survivors),
+   with only what was known then: prices, beta, Fed and CPI dates, and earnings dates up to two weeks ahead (from filings,
+   or for stocks without a filing record, estimated from the volume spikes that mark earnings days); later reports are
+   placed about 91 days after the last one, as the live model does when no date is announced. The weeks are fixed to the
+   calendar, so each month's grid adds only the weeks it hasn't graded. Accuracy is visible from the first day and the
+   learners have data to start from. It's labelled "Backtest" and never mixed with live grades.
+
+**Checked on simulated markets (1 Nov 2026).** The learning loop was run the way the pipeline runs it:
+* the backtest first;
+* then each day: grade, learn, forecast with what was learned, and compact the ledger as a save does.
+
+It covered 400 trading days of simulated markets for 36 stocks plus an index. The markets had a market factor,
+volatility clustering, fat tails, earnings jumps the model isn't told about and a 25% step up in volatility. Every
+forecast was also made without learning, and both were scored on the same outcomes. The table shows how much better the
+quantile score was with learning at 1 week / 1 month / 3 months, over all 400 days:
+| Simulated market | Previous version (one ridge regression) | This version (competition and range learner) |
+|---|---|---|
+| No real signal | 0.0% / −0.1% / −0.1% (worst quarter −0.6%); never switched on | +0.6% / +0.5% / −0.1% (worst quarter −0.6%); never switched on |
+| A straight-line signal | +1.0% / +3.9% / +4.3%; on from day 21 | +1.3% / +4.1% / +5.9%, better in every quarter; ridge won every week; on from day 42 |
+| A signal that works only in volatile stocks | +0.6% / +2.0% / +2.2% | +0.9% / +2.7% / +4.2%, better in every quarter; the average of the three won, and trees and the network each beat ridge |
+| Earnings jumps 2.2× bigger than in the history | 0.0% / 0.0% / 0.0% | +1.8% / +1.8% / +0.3%, better in every quarter at 1 week and 1 month (the range learner) |
+
+In plain terms:
+* With nothing to learn, the signal learner stays off and forecasts stay about the same.
+* With a real signal, the competition picks the right kind of model: ridge for a straight-line effect, and the
+  combination when the effect bends. Every quarter improves.
+* The range learner pays off when some stocks' risks change in ways the base model misses.
+
+The signal learner now switches on about three weeks later than before; that is the price of counting only completed
+months. The planted signals are stronger than most real ones, so expect "rejected" for a long time. The range learner is
+the likelier source of real gains. The first audit's simulations (DATA_SOURCES, audit log item 11) found the original
+learning made forecasts up to 4.7% worse in some quarters when there was nothing to learn. The simulation script is
+`tests/sim_learning.py`.
 
 ## 10. Valuation: cheap or expensive versus similar companies
 * **Data:** the SEC's XBRL company facts (what companies report in their 10-Ks and 10-Qs): revenue, gross profit, operating

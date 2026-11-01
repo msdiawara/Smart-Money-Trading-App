@@ -220,6 +220,7 @@ def check_stock_files(a: Audit, out: Path, state: dict | None = None, forecasts_
         a.fail("forecasts", "forecast:valid", f"{len(bad_fc)} forecasts are malformed (unordered, non-positive or misdated)", bad_fc[:10])
     else:
         a.ok("forecasts", "forecast:valid", f"{n_fc} forecasts: every range ordered, positive and anchored on a real price")
+    _check_index(a, out, n_fc)
     if forecasts_on:
         _check_forecast_age(a, made, n_fc, len(files))
     else:
@@ -229,6 +230,26 @@ def check_stock_files(a: Audit, out: Path, state: dict | None = None, forecasts_
     elif n_val:
         a.ok("valuation", "valuation:valid", f"{n_val} valuations with finite, in-range numbers")
     return {"n": len(files), "forecasts": n_fc, "valuations": n_val}
+
+
+def _check_index(a: Audit, out: Path, n_fc: int) -> None:
+    """The All forecasts list (forecasts.json): there, rewritten this run, and listing every stock with a forecast."""
+    p = out / "forecasts.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    except ValueError:
+        d = None
+    if not isinstance(d, dict) or not isinstance(d.get("stocks"), list):
+        a.fail("forecasts", "forecast:index", "The All forecasts list (forecasts.json) is missing or unreadable")
+        return
+    age = _age_min(d.get("generated_at"))
+    n = len(d["stocks"])
+    if age is None or age > 30:
+        a.fail("forecasts", "forecast:index", f"The All forecasts list wasn't rewritten this run ({age and round(age)} minutes old)")
+    elif abs(n - n_fc) > max(2, 0.02 * n_fc):
+        a.warn("forecasts", "forecast:index", f"The All forecasts list has {n} stocks but {n_fc} stock pages have a forecast")
+    else:
+        a.ok("forecasts", "forecast:index", f"The All forecasts list has all {n} stocks with a forecast")
 
 
 def _sessions_behind(made: str, last) -> int:

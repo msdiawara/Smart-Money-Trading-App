@@ -123,13 +123,33 @@
       <p class="small muted">Targets: 50%, 80%, 90%. All figures are since the start; under the 80% figure, the last 120 days with its 95% interval (wide, because forecasts made the same week share the market's moves).</p></div></section>` : "";
   }
 
+  const ALGO = { ridge: "Ridge regression", trees: "Gradient-boosted trees", neural_net: "Neural network", average: "Average of the three" };
+  function rangeRows(rl) {
+    const U = window.SMR.u;
+    if (!rl || !Object.keys(rl).length) return "";
+    const rows = HZ.filter(([k]) => rl[k]).map(([k, l]) => { const x = rl[k];
+      const what = x.status === "applied" ? `On: the stretch varies by stock (×${U.num((x.scale_spread || [])[0], 2)} to ×${U.num((x.scale_spread || [])[1], 2)}), ${signed(x.holdout_gain_vs_single, 1)} better than one stretch for all on recent forecasts`
+        : x.status === "held" ? `Off: not better than one stretch for all on recent forecasts (${signed(x.holdout_gain_vs_single || 0, 1)})`
+        : `<span class="muted">Learning: ${U.num(x.n || 0)}/${U.num((x.need || {}).n || 1000)} graded, ${U.num(x.periods || 0)}/${U.num((x.need || {}).periods || 6)} months</span>`;
+      return `<tr><td>${l}</td><td>${what}</td></tr>`; }).join("");
+    return `<h3>Range learner (machine learning)</h3><div class="scroll-x"><table class="cmp left2"><tr><th>Horizon</th><th>Stock-by-stock range widths</th></tr>${rows}</table></div>
+      <p class="small muted">Gradient-boosted trees learn which stocks' ranges need more or less room (recent vs usual volatility, a big recent jump, an earnings report inside the window…). Used only where they beat one stretch for all on the newest forecasts they weren't fitted on.</p>`;
+  }
   function learningCard(L) {
     const U = window.SMR.u, c = L.calibration || {}, t = L.tilt || {}, b = L.blend || {};
-    const rows = HZ.map(([k, l]) => { const x = c[k] || {}; return `<tr><td>${l}</td><td>${x.status === "applied" ? `×${U.num(x.scale, 2)}${x.shift ? `, ${signed(Math.expm1(x.shift), 1)} median` : ""}<div class="small muted">from ${x.from === "backtest" ? "the backtest" : "live grades"}, ${U.num(x.n)} forecasts over ${U.num(x.dates)} days</div>` : `<span class="muted">Learning: ${U.num(x.n || 0)}/200 graded, ${U.num(x.dates || 0)}/20 days</span>`}</td><td class="nw">${x.cov80_holdout != null ? `${pc(x.cov80_holdout_raw)} → ${pc(x.cov80_holdout)}<div class="small muted">on ${U.num(x.holdout_days)} later days</div>` : x.cov80_raw != null ? pc(x.cov80_raw) : "—"}</td></tr>`; }).join("");
+    const src = (x) => `from ${x.from === "backtest" ? "the backtest" : "live grades"}, ${U.num(x.n)} forecasts over ${U.num(x.periods ?? x.dates)} ${x.periods != null ? "independent months" : "days"}`;
+    const rows = HZ.map(([k, l]) => { const x = c[k] || {}; return `<tr><td>${l}</td><td>${x.status === "applied" ? `×${U.num(x.scale, 2)}${x.shift ? `, ${signed(Math.expm1(x.shift), 1)} median` : ""}<div class="small muted">${src(x)}</div>`
+      : x.status === "held" ? `No change<div class="small muted">Held back: a correction fitted on older forecasts would have made the newest ones worse (${src(x)})</div>`
+      : `<span class="muted">Learning: ${U.num(x.n || 0)}/200 graded, ${U.num(x.dates || 0)}/20 days</span>`}</td><td class="nw">${x.cov80_holdout != null ? `${pc(x.cov80_holdout_raw)} → ${pc(x.status === "held" ? x.cov80_holdout_raw : x.cov80_holdout)}<div class="small muted">on ${U.num(x.holdout_days)} later days</div>` : x.cov80_raw != null ? pc(x.cov80_raw) : "—"}</td></tr>`; }).join("");
     return `<section class="sec"><h2>What it has learned</h2><div class="panel">
       <h3>Range calibration</h3><div class="scroll-x"><table class="cmp left2"><tr><th>Horizon</th><th>Adjustment</th><th>80% held: before → after</th></tr>${rows}</table></div>
-      <p class="small muted">Learned only from graded forecasts, shrunk toward "no change" until many different days agree, and capped so one bad month can't swing it. "Before → after" is checked on the most recent days, with the correction fitted only on the days before them, so it's a real test rather than the fit grading itself.</p>
-      <h3>Signal tilts</h3><p class="small">${U.esc(t.status || "Waiting for graded forecasts.")}${t.test_gain != null ? ` Walk-forward test: ${signed(t.test_gain, 2)} average monthly error reduction (t = ${U.num(t.t, 1)}).` : ""}</p>
+      <p class="small muted">Learned only from graded forecasts. Forecasts made in the same month share most of their outcome, so evidence is counted in independent months: the correction grows as more months agree, is capped, and is used only if it would have improved the newest forecasts it wasn't fitted on. "Before → after" is that test.</p>
+      ${rangeRows(L.range)}
+      <h3>Signal learner (machine learning)</h3><p class="small">${U.esc(t.status || "Waiting for graded forecasts.")}${t.test_gain != null ? ` Walk-forward record: ${signed(t.test_gain, 2)} average monthly error reduction over ${U.num(t.test_months)} test months (t = ${U.num(t.t, 1)}; ${U.num(t.t_needed ?? 2.5, 1)} needed, stricter while test months are few).` : ""}</p>
+      ${t.candidates && Object.keys(t.candidates).length ? `<div class="scroll-x"><table class="cmp left2"><tr><th>Algorithm</th><th>Monthly gain on unseen months</th><th>t</th></tr>
+        ${Object.entries(t.candidates).map(([k, v]) => `<tr><td>${U.esc(ALGO[k] || k)}${t.on && t.model === k ? ` <span class="tag">in use</span>` : !t.on && t.best === k ? ` <span class="small muted">(best)</span>` : ""}</td><td>${signed(v.gain, 2)}</td><td>${U.num(v.t, 1)}</td></tr>`).join("")}</table></div>
+        <p class="small muted">Each algorithm is refit month by month on earlier months only and scored on the next, on how each stock did against the others that day. The one used each month is the one with the better record before it, so even the choice of algorithm is tested on data it hadn't seen.</p>` : ""}
+      ${t.n ? `<p class="small muted">Learning from ${U.num(t.n)} graded 1-month forecasts (${U.num(t.n_live || 0)} live, the rest from the backtest) over ${U.num(t.months)} months.</p>` : ""}
       ${t.on && t.weights ? `<p class="small muted">Weights: ${Object.entries(t.weights).filter(([, w]) => Math.abs(w) > 1e-5).map(([k, w]) => `${U.esc(k)} ${w > 0 ? "+" : ""}${(w * 10000).toFixed(0)}`).join(", ")} (basis points of 1-month return per standard deviation of the signal).</p>` : ""}
       <h3>Model + Claude blend</h3><p class="small">${HZ.every(([k]) => ((b[k] || {}).w_claude ?? 0.5) === 0.5) ? "Equal weights at every horizon until both have graded forecasts." : HZ.map(([k, l]) => `${l}: Claude ${Math.round(((b[k] || {}).w_claude ?? 0.5) * 100)}%`).join("; ") + "."}</p>
       <p class="small muted">${L.updated ? `Updated ${U.esc(U.ago(L.updated))}.` : ""} Signal tilts must improve forecasts made after the data they were fitted on, month after month, before they're used; most market signals are weak, so "rejected" is the expected result for a long time.</p></div></section>`;
@@ -137,11 +157,12 @@
 
   function lessonsCard(A) {
     const U = window.SMR.u, ls = A.lessons || [], pm = A.postmortems || [];
-    if (!ls.length && !pm.length) return `<section class="sec"><h2>Claude's lessons</h2><div class="panel"><p class="small muted">When one of Claude's forecasts misses its 90% range, Claude investigates what happened and writes a lesson it reads before every later forecast. None yet.</p></div></section>`;
+    if (!ls.length && !pm.length) return `<section class="sec"><h2>Claude's lessons</h2><div class="panel"><p class="small muted">When one of Claude's forecasts misses its 90% range, Claude investigates what happened and names the cause. Causes that at least two reviews agree on go into its later forecasts (its free-text notes are shown here but never fed back, so a misleading web page can't steer it). None yet.</p></div></section>`;
     const cause = { volatility_underestimated: "Volatility underestimated", event_surprise: "Event surprise", drift_bias: "Direction bias", regime_shift: "Regime shift", company_news: "Company news", sector_or_macro_move: "Sector or macro move", data_error: "Data error", unforeseeable: "Unforeseeable" };
     return `<section class="sec"><h2>Claude's lessons</h2><div class="panel">
       <ul class="lessons">${ls.slice(0, 10).map((x) => `<li><b>${U.esc(x.lesson)}</b><div class="small muted">${U.esc(x.t || "")}: ${U.esc(cause[x.cause] || x.cause || "")}, ${U.esc(x.foreseeable === "yes" ? "foreseeable" : x.foreseeable === "no" ? "not foreseeable" : "partly foreseeable")}${x.range_advice && x.range_advice !== "same" ? `; ranges ${U.esc(x.range_advice)}` : ""} · ${U.esc(U.ago(x.made))}</div></li>`).join("")}</ul>
-      ${pm.length ? `<details class="more"><summary>Post-mortems (${pm.length})</summary>${pm.map((p) => `<div class="pm"><b>${U.esc(p.t)}</b> <span class="muted small">forecast ${U.esc(U.dateFmt(p.forecast_made))}, ${U.num(p.h)} sessions</span><p class="small">${U.esc(p.what_happened)}</p></div>`).join("")}</details>` : ""}
+      <p class="small muted">Its later forecasts see the causes that at least two reviews agree on; these notes are for you and aren't fed back to it.</p>
+      ${pm.length ? `<details class="more"><summary>Post-mortems (${pm.length})</summary>${pm.map((p) => `<div class="pm"><b>${U.esc(p.t)}</b> <span class="muted small">forecast ${U.dateFmt(p.forecast_made)}, ${U.num(p.h)} sessions</span><p class="small">${U.esc(p.what_happened)}</p></div>`).join("")}</details>` : ""}
     </div></section>`;
   }
 
