@@ -253,13 +253,13 @@ def test_backtest_rows_written_before_features_get_them_filled_in():
     made = dt.date.fromordinal(dates[300]).isoformat()
     early = dt.date.fromordinal(dates[30]).isoformat()             # under three months of history: no features
     L = {"graded": {"quant_bt": {"21": [{"t": "SA", "made": made, "er": 0.01}, {"t": "SA", "made": early, "er": 0.0}]}}}
-    n = insight._fill_bt_features(L, panel, panel.c("SPY"))
+    n = insight._fill_bt_features(L, {"m": panel}, {"m": panel.c("SPY")})
     rows = L["graded"]["quant_bt"]["21"]
     assert n == 2 and rows[0]["f"]["v"] == learn.FEAT_V and "rev" in rows[0]["f"] and rows[1].get("f_tried")
     c, b = panel.c("SA")[: 301], panel.c("SPY")[: 301]
     want = math.log(c[-1] / c[-22]) - math.log(b[-1] / b[-22])
     assert rows[0]["f"]["rev"] == pytest.approx(want, abs=1e-4)
-    assert insight._fill_bt_features(L, panel, panel.c("SPY")) == 0          # done once
+    assert insight._fill_bt_features(L, {"m": panel}, {"m": panel.c("SPY")}) == 0          # done once
 
 
 def test_live_features_use_the_benchmark_on_the_same_days():

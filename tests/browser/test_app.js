@@ -111,6 +111,33 @@ const assert = require("assert");
   assert(st.includes("On this phone") && st.includes("On the server"), "self-check sections");
   for (const h of ["#/ideas", "#/watch", "#/ask", "#/size"]) { await page.goto(base + h); await page.waitForTimeout(500); await noOverflow(h); }
 
+  // 5a. Results: the win rate, what was expected, the misses taken apart, the filters and the lists
+  await page.goto(base + "#/results"); await page.waitForSelector(".res-hero", { timeout: 8000 });   // loaded when opened
+  const res = await page.innerText("#view");
+  assert(!/Not taken apart yet\. Not taken apart yet/.test(res), "no doubled explanations");
+  assert(/\d+%\s*of [\d,]+ graded forecasts ended inside their 80% range/.test(res), "headline win rate shown");
+  for (const s of ["What it expected, and what happened", "Month by month", "Why the misses missed", "Misses, explained",
+    "Every graded forecast", "What the misses have changed"]) assert(res.includes(s), "results page shows " + s);
+  assert(await page.$("#r-trend svg"), "results trend drawn");
+  assert(await page.$('.tabs a[data-tab="results"].on'), "the Results tab is highlighted");
+  const nMiss0 = await page.$$eval(".res-miss", (a) => a.length);
+  assert(nMiss0 > 0 && (await page.innerText(".res-miss")).includes("Why:") && (await page.innerText(".res-miss")).includes("What changes:"),
+    "each miss says why and what changes");
+  assert(!/\?×|—\s*drift/.test(await page.innerText(".res-misses")), "no missing numbers in the explanations");
+  const chip = await page.$('.chips [data-rcause]:not([data-rcause="all"])');
+  if (chip) {
+    const want = await chip.getAttribute("data-rcause"); await chip.click(); await page.waitForTimeout(200);
+    const pressed = await page.$eval(`.chips [data-rcause="${want}"]`, (b) => b.getAttribute("aria-pressed"));
+    assert(pressed === "true", "a cause filter stays selected after the redraw");
+  }
+  await page.click('[data-rh="1m"]'); await page.waitForTimeout(200);
+  assert(/graded 1-month forecasts/.test(await page.innerText(".res-hero")), "horizon filter updates the headline");
+  assert(/\(1-month forecasts\)/.test(await page.innerText("#view")), "the month-by-month chart follows the horizon");
+  await page.click('[data-rlist="missed"]'); await page.waitForTimeout(200);
+  const marks = await page.$$eval(".res-row .res-marks", (a) => a.map((x) => x.textContent));
+  assert(marks.length && marks.every((m) => m.includes("Missed")), "the missed filter lists only misses");
+  await noOverflow("#/results");
+
   // 5b. All forecasts: every stock listed; typing with a phone keyboard that composes words keeps the box intact;
   // Back from a stock and a refresh both keep the reader's place in the list
   await page.goto(base + "#/forecasts"); await page.waitForTimeout(900);

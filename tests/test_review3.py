@@ -146,18 +146,26 @@ def test_tilt_needs_two_weekly_passes_and_switches_off_when_it_stops_working():
     assert not same["on"] and same["passes"] == 1 and "newly completed month" in same["status"]
     g2 = learn.tilt_gate(same, {**passed, "last_month": "2026-09"})
     assert g2["on"] and g2["model"] == "trees"
-    g3 = learn.tilt_gate(g2, {"accepted": False, "t": 1.8, "recent_gain": 0.004, "model": "none", "fv": ml.FEAT_V})
-    assert g3["on"] and g3["model"] == "trees" and g3["accepted"]     # weaker but holding: keeps its algorithm
+    weak = {"accepted": False, "t": 1.8, "recent_gain": 0.004, "model": "none", "fv": ml.FEAT_V, "best": "trees",
+            "best_t": 1.9}
+    g3 = learn.tilt_gate(g2, weak)
+    assert g3["on"] and g3["model"] == "trees" and g3["accepted"]     # weaker but holding: this week's best stays on
+    # (and only while the algorithm it would run holds up on its own record)
+    assert not learn.tilt_gate(g2, {**weak, "best_t": 1.2})["on"]
+    assert learn.tilt_gate(g2, {**weak, "best": "ridge"})["model"] == "ridge"
     g4 = learn.tilt_gate(g3, {"accepted": False, "t": 0.5, "recent_gain": -0.01, "model": "none", "fv": ml.FEAT_V})
     assert not g4["on"] and ml.SignalModel.build(g4, {"graded": {}}) is None
 
 
 def test_a_learner_whose_weekly_retest_is_overdue_is_paused():
     from pipeline import ml
-    on = {"accepted": True, "on": True, "model": "ridge", "fv": ml.FEAT_V, "passes": 2}
+    on = {"accepted": True, "on": True, "model": "ridge", "fv": ml.FEAT_V, "hp": [ml.HP_V, ml.CANDIDATES], "passes": 2}
     now = dt.datetime(2026, 10, 31, 12, tzinfo=dt.timezone.utc)
     fresh = learn.tilt_in_force({"tilt": on, "tilt_at": "2026-10-20T12:00:00Z"}, now)
     assert fresh["on"] and fresh["model"] == "ridge"
+    # decided by an older version of the test (other candidates or settings): shown and stored as switched off
+    old = learn.tilt_in_force({"tilt": {**on, "hp": [ml.HP_V - 1, ml.CANDIDATES]}, "tilt_at": "2026-10-20T12:00:00Z"}, now)
+    assert not old["on"] and old["model"] == "none" and old["status"].startswith("switched off")
     stale = learn.tilt_in_force({"tilt": on, "tilt_at": "2026-10-05T12:00:00Z"}, now)
     assert not stale["on"] and stale["model"] == "none" and stale["status"].startswith("paused")
     assert not learn.tilt_in_force({"tilt": on}, now)["on"]                 # never re-tested: not applied

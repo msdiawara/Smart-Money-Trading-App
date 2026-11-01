@@ -31,4 +31,9 @@ for path in sys.argv[1:]:
     print(f"  signal tilt first on at day {first}; final status: {d['timeline'][-1]['tilt'].get('status')}")
     last = d["timeline"][-1]
     print("  final calibration:", {k: (v["status"], v["from"], v["scale"], v["shift"]) for k, v in last["calib"].items()})
-    print("  final tilt:", {k: last["tilt"].get(k) for k in ("t", "test_gain", "recent_gain", "test_months", "weights")})
+    print("  final tilt:", {k: last["tilt"].get(k) for k in ("t", "test_gain", "recent_gain", "test_months", "weights",
+                                                             "model", "best", "fusion", "fusion_months", "fusion_waiting")})
+    picks = [(t["day"], (t["tilt"] or {}).get("best")) for t in d["timeline"]]
+    print("  best candidate by day:", picks)
+    print("  final range learner:", last.get("range"))
+    print("  final keeper:", {k: (v.get("status"), v.get("m")) for k, v in (last.get("keeper") or {}).items()})

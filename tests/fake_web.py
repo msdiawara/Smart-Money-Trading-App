@@ -436,6 +436,28 @@ class FakeWeb:
                 return J({"status": "NOT_AUTHORIZED"}, 403)
             res = [{"T": sym, "c": close_on(sym, day), "v": 1_000_000} for sym in CHARTS if close_on(sym, day)]
             return J({"status": "OK", "resultsCount": len(res), "results": res})
+        if "alpaca.markets/v2/assets" in url:            # the deep history's asset list
+            return J([{"symbol": sym, "exchange": "NYSE"} for sym in CHARTS] if "status=active" in url else [])
+        if "data.alpaca.markets/v2/stocks/bars" in url:      # the deep history's bars (as far back as the charts go)
+            from urllib.parse import parse_qs, urlparse
+            q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
+            lo, hi, out = q["start"][:10], q["end"][:10], {}
+            for sym in q["symbols"].split(","):
+                if sym not in CHARTS:
+                    continue
+                close_on(sym, lo)
+                bars = [{"t": f"{d}T04:00:00Z", "c": c, "v": 1_000_000}
+                        for d, c in sorted(_CLOSES[sym].items()) if lo <= d <= hi and c]
+                if q["timeframe"] == "1Month":
+                    by: dict = {}
+                    for b in bars:
+                        m_ = b["t"][:7]
+                        by[m_] = {"t": f"{m_}-01T04:00:00Z", "c": b["c"], "v": by.get(m_, {"v": 0})["v"] + b["v"]}
+                    bars = [by[k] for k in sorted(by)]
+                out[sym] = bars
+            return J({"bars": out, "next_page_token": None})
+        if "api.massive.com/v3/reference/tickers" in url and "active=false" in url:
+            return J({"status": "OK", "results": [], "next_url": None})
         if "data.alpaca.markets/v2/stocks/snapshots" in url:
             syms = re.search(r"symbols=([^&]+)", url).group(1).split(",")
             out = {}

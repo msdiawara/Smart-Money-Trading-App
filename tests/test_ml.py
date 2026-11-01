@@ -2,6 +2,7 @@
 them. The algorithm competition itself is tested in test_forecast.py."""
 import datetime as dt
 import json
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -63,19 +64,23 @@ def test_forecast_with_learning_rebuilds_with_the_stocks_own_ranges():
                        tilt_parts=tilt_parts, paths=300)
 
     class _RM:
-        def calib_for(self, feats, fc, calib):
+        def calib_for(self, feats, fc, calib, t=None):
             assert fc["horizons"]["1m"]["date"]                    # sees the first build's dates
+            assert t == seen_t[0]                                  # the stock, for its own record of misses
             return {**calib, "1m": {"status": "applied", "scale": 1.5, "shift": 0.0}}
 
     class _SM:
         def tilt(self, feats):
             return 0.01, [{"k": "rev", "label": "x", "h_ret": 0.01}], 21
 
+    seen_t = [None]
     base, _ = ml.forecast_with_learning(build, {}, {}, None, None)
     fc, tr = ml.forecast_with_learning(build, {}, {}, _SM(), _RM())
     assert len(calls) == 3 and calls[-1]["1m"]["scale"] == 1.5 and tr == 0.01
     w = lambda f: f["horizons"]["1m"]["lq"][5] - f["horizons"]["1m"]["lq"][1]
     assert w(fc) > 1.3 * w(base) and fc["tilt"]["ret"] == 0.01
+    seen_t[0] = "ACME"
+    assert ml.forecast_with_learning(build, {}, {}, _SM(), _RM(), t="ACME")[0]
 
 
 def test_every_stock_with_a_forecast_is_listed(tmp_path):
@@ -186,14 +191,14 @@ def test_earnings_flag_follows_the_forecasts_own_events():
     assert ml.row_features({"rev": 0.1}, fc, "1m") == {"rev": 0.1, "ein": 1}
 
 
-@pytest.mark.parametrize("model", ["ridge", "trees", "neural_net", "average"])
+@pytest.mark.parametrize("model", ml.CANDIDATES)
 def test_every_algorithm_fits_and_predicts_with_missing_values(model):
     rng = np.random.default_rng(5)
     X = rng.normal(size=(800, len(ml.FEATS)))
     X[:, ml.FEATS.index("val")] = np.nan                     # a signal nobody has
     X[rng.random(X.shape) < 0.2] = np.nan
     y = 0.02 * np.nan_to_num(X[:, 1]) + rng.normal(0, 0.05, 800)
-    f = ml.fit(model, X, y, periods=10)
+    f = ml.fit(model, X, y, periods=10, bases=ml.AVAILABLE[-3:] if model == "fusion" else None)
     p = f.predict(X[:5])
     assert p.shape == (5,) and np.all(np.isfinite(p))
     assert np.isfinite(f.predict(np.full((1, len(ml.FEATS)), np.nan))).all()
@@ -251,7 +256,7 @@ def test_the_target_is_how_a_stock_did_against_the_others():
 
 def test_nudges_are_centred_on_the_days_stocks():
     from tests.test_forecast import _tilt_rows
-    rows = _tilt_rows(2500, 0.03, seed=5)
+    rows = _tilt_rows(4000, 0.03, seed=5, n_dates=380)
     L = {"graded": {"quant": {"21": rows}}}
     res = ml.compete(L)
     assert res["accepted"], res["status"]
@@ -318,7 +323,8 @@ def _fc_env(tmp_path, monkeypatch):
     (tmp_path / "heavy").mkdir()
     settings = SimpleNamespace(c=lambda *k, default=None: {"paths": 300} if k[0] == "forecast" else default,
                                cache_dir=tmp_path / "cache", mark_heavy_dirty=lambda: None)
-    tilt = {"on": True, "accepted": True, "model": "ridge", "fv": ml.FEAT_V, "h": 21, "cap": 0.02, "status": "applied"}
+    tilt = {"on": True, "accepted": True, "model": "ridge", "fv": ml.FEAT_V, "hp": [ml.HP_V, ml.CANDIDATES], "h": 21,
+            "cap": 0.02, "status": "applied"}
     state = {"quotes": {"ACME": {"price": 41.0, "beta": 1.0}}, "events": [],
              "learn": {"tilt": tilt, "tilt_at": "2026-10-28T00:00:00Z", "range": {}}}
     store = SimpleNamespace(series=lambda t: ser.get(t))
@@ -485,7 +491,7 @@ def test_the_backtest_queue_keeps_its_dates_when_days_are_added_to_the_history(t
     short = quant.Panel(_Matrix({k: v[1:] for k, v in cols.items()}, dates[1:]))
     want = [int(short.dates[i]) for i in (300, 350, 400)]       # queued while the history was one day shorter
     L = fledger.load(heavy)
-    L["bt"] = {"v": 3, "built": "2026-10", "anchors": want, "todo": [["SA", d] for d in want]}
+    L["bt"] = {"v": 4, "panels": ["m"], "built": "2026-10", "anchors": want, "todo": [["SA", d, "m"] for d in want]}
     fledger.save(heavy, L)
     cfg = {"forecast": {"backtest_paths": 200}}
     settings = SimpleNamespace(c=lambda *k, default=None: cfg.get(k[0], default) if len(k) == 1 else default,
@@ -528,3 +534,283 @@ def test_calibration_stays_on_the_backtest_until_live_grades_span_enough_months(
     c = learn.calibration(L)["1m"]
     assert c["from"] == "backtest" and c["status"] in ("applied", "held")
     assert ml.range_learner(L, learn.calibration(L))["1m"]["from"] == "backtest"
+
+
+# ---------------------------------------------------------------- the new algorithms and the coverage keeper
+
+def test_every_candidate_competes_and_catboost_is_one_of_them():
+    assert ml.BASE == ["ridge", "huber", "spline", "trees", "random_forest", "catboost", "neural_net"]
+    assert ml.CANDIDATES == ml.AVAILABLE + ["average", "fusion"]
+    assert "catboost" in ml.AVAILABLE          # installed from requirements.txt; without it the others still run
+    from tests.test_forecast import _tilt_rows
+    res = ml.compete({"graded": {"quant": {"21": _tilt_rows(4000, 0.03, seed=5, n_dates=380)}}})
+    assert set(res["candidates"]) == set(ml.CANDIDATES) and res["accepted"]
+
+
+def test_the_pipeline_fits_with_the_full_settings(monkeypatch):
+    monkeypatch.delenv("SMR_ML_LIGHT", raising=False)           # what the pipeline runs (the suite runs lighter)
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(800, len(ml.FEATS)))
+    y = 0.01 * X[:, 0] + rng.normal(0, 0.05, 800)
+    f = ml.fit("average", X, y, periods=12)
+    assert f.parts["bases"] == ml.AVAILABLE
+    assert f.parts["random_forest"].n_estimators == 150 and len(f.parts["neural_net"]) == 3
+    assert f.parts["catboost"].tree_count_ == 150
+    assert np.isfinite(f.predict(X[:5])).all()
+
+
+def test_a_broken_catboost_leaves_the_others_running(monkeypatch):
+    import catboost
+
+    class Broken:
+        def __init__(self, **kw):
+            pass
+
+        def fit(self, *a, **k):
+            raise RuntimeError("no CPU support")
+    monkeypatch.setattr(catboost, "CatBoostRegressor", Broken)
+    # checked when the module loads: a CatBoost that can't fit here is left out, and the others compete without it
+    assert not ml._catboost_works()
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(600, len(ml.FEATS)))
+    y = rng.normal(0, 0.05, 600)
+    # one that fails later, on the data, fails the build: an average without one of its members isn't the one tested
+    with pytest.raises(RuntimeError):
+        ml.fit("average", X, y, periods=12)
+    with pytest.raises(RuntimeError):
+        ml.fit("catboost", X, y, periods=12)
+    assert np.isfinite(ml.fit("ridge", X, y, periods=12).predict(X[:5])).all()
+
+
+def test_robust_regression_isnt_dragged_by_a_few_huge_errors():
+    rng = np.random.default_rng(8)
+    X = rng.normal(size=(4000, len(ml.FEATS)))
+    y = 0.02 * X[:, 0] + rng.normal(0, 0.03, 4000)
+    y[:40] += np.sign(X[:40, 0]) * -3.0              # a few takeover-sized moves against the pattern
+    ridge, huber = (ml.fit(k, X, y, periods=60) for k in ("ridge", "huber"))
+    x1 = np.zeros((1, len(ml.FEATS)))
+    x1[0, 0] = 1.0
+    assert huber.predict(x1)[0] > 0.01 > ridge.predict(x1)[0]
+
+
+def test_splines_catch_an_effect_that_only_extreme_values_have():
+    rng = np.random.default_rng(9)
+    X = rng.normal(size=(6000, len(ml.FEATS)))
+    y = 0.05 * (X[:, 2] > 1.5) + rng.normal(0, 0.03, 6000)
+    spline, ridge = (ml.fit(k, X, y, periods=60) for k in ("spline", "ridge"))
+    hi, mid = np.zeros((1, len(ml.FEATS))), np.zeros((1, len(ml.FEATS)))
+    hi[0, 2] = 2.2
+    gap_s = spline.predict(hi)[0] - spline.predict(mid)[0]
+    gap_r = ridge.predict(hi)[0] - ridge.predict(mid)[0]
+    assert gap_s > 0.03 and gap_s > 2 * gap_r
+
+
+def _keeper_rows(days: int, too_narrow: float, seed: int = 1, per: int = 40, aci=None) -> dict:
+    """1-day forecasts whose published 80% ranges are `too_narrow` times the width they should be."""
+    rng = np.random.default_rng(seed)
+    rows, d = [], dt.date(2026, 1, 5)
+    for _ in range(days):
+        while d.weekday() >= 5:
+            d += dt.timedelta(days=1)
+        for i in range(per):
+            err = float(rng.normal(0, 0.02))
+            w = 0.02 * 1.2816 * too_narrow * (aci or 1.0)
+            r = {"t": f"S{i}", "made": d.isoformat(), "err": err, "pw10": w, "pw90": w}
+            if aci:
+                r["aci"] = aci
+            rows.append(r)
+        d += dt.timedelta(days=1)
+    return {"graded": {"quant": {"1": rows}}}
+
+
+def test_the_coverage_keeper_widens_ranges_that_miss_too_often():
+    k = ml.coverage_keeper(_keeper_rows(160, too_narrow=0.75))["1d"]
+    assert k["status"] == "applied" and k["m"] > 1.15 and k["replay_gain"] > 0.002
+    assert k["cov80_without"] < 0.7 and abs(k["cov80_with"] - 0.8) < abs(k["cov80_without"] - 0.8)
+    ok = ml.coverage_keeper(_keeper_rows(160, too_narrow=1.0))["1d"]     # already right: leave them alone
+    assert ok["status"] == "held" and 0.9 < ok["m"] < 1.1
+    assert ml.coverage_keeper(_keeper_rows(20, too_narrow=0.75))["1d"]["status"] == "learning"
+
+
+def test_the_keeper_judges_ranges_without_its_own_multiplier_and_holds_steady():
+    plain = ml.coverage_keeper(_keeper_rows(160, too_narrow=0.75))["1d"]
+    stretched = ml.coverage_keeper(_keeper_rows(160, too_narrow=0.75, aci=1.3))["1d"]   # published ×1.3 by it
+    assert stretched["m"] == pytest.approx(plain["m"], rel=1e-6)
+    import pipeline.ml as m
+    real = m._pinball3
+    try:      # its edge drops below the bar to switch on: stays on if it was on, stays off if not
+        m._pinball3 = lambda er, w10, w90, scale, shift: real(er, w10, w90, scale, shift) * (0.999 if scale != 1.0 else 1.0)
+        rows = _keeper_rows(160, too_narrow=0.75)
+        assert ml.coverage_keeper(rows, prev={"1d": {"status": "applied"}})["1d"]["status"] == "applied"
+    finally:
+        m._pinball3 = real
+
+
+def test_the_keepers_multiplier_goes_on_top_of_every_range():
+    seen = []
+
+    def build(calib, tilt_ret, tilt_days, tilt_parts):
+        seen.append(calib)
+        return {"horizons": {}, "events": []}
+    calib = {"1m": {"status": "applied", "scale": 1.2, "shift": 0.01}}
+    ml.forecast_with_learning(build, {}, calib, None, None, {"1m": 1.1, "1d": 0.9})
+    c = seen[0]
+    from pipeline import forecast as F
+
+    def stretch(cal, k):
+        return F._interp_calib(cal, k, "scale", 1.0) * F._interp_calib(cal, k, "keep", 1.0)
+    # the keeper multiplies whatever stretch a horizon has, its own (1m) or its neighbour's (1d gets 1m's 1.2)
+    assert stretch(c, 21) == pytest.approx(1.32) and stretch(c, 1) == pytest.approx(1.08)
+    # where the keeper is off (1w, 3m) and beyond what it grades (1y), the ranges are exactly as calibrated
+    for k in (5, 63, 252):
+        assert stretch(c, k) == pytest.approx(stretch(calib, k))
+    assert all(F._interp_calib(c, k, "shift", 0.0) == F._interp_calib(calib, k, "shift", 0.0) for k in range(1, 253))
+    assert calib == {"1m": {"status": "applied", "scale": 1.2, "shift": 0.01}}          # the input isn't changed
+    assert ml._keep(calib, {}) == calib and ml._keep(calib, None) == calib
+
+
+def test_a_forecast_publishes_the_keepers_factor_it_was_built_with():
+    from pipeline import forecast as F
+    from tests.test_forecast import END, gbm, trading_dates
+    dates, c = trading_dates(END, 600), list(gbm(600, 0.02, seed=4))
+    calib = {"1m": {"scale": 1.4, "shift": 0.0}}
+    plain = F.build("C", dates, c, paths=800, calib=calib)
+    kept = F.build("C", dates, c, paths=800, calib=ml._keep(calib, {"1m": 1.1}))
+    w = {k: fc["horizons"]["1m"]["lq"][5] - fc["horizons"]["1m"]["lq"][1] for k, fc in (("p", plain), ("k", kept))}
+    assert w["k"] / w["p"] == pytest.approx(1.1, rel=0.02)
+    assert kept["calib"]["1m"]["keep"] == 1.1 and "keep" not in kept["calib"]["1w"] and "keep" not in plain["calib"]["1m"]
+    assert kept["calib"]["1m"]["scale"] == plain["calib"]["1m"]["scale"] == 1.4
+
+
+def test_the_ledger_keeps_the_published_width_for_the_keeper():
+    L = {"v": 1, "pending": {}, "graded": {}, "agg": {}, "last": {}}
+    lq = [-0.06, -0.04, -0.02, 0.0, 0.02, 0.05, 0.07]
+    fledger.record(L, "quant", "ACME", "2026-10-01", 1, lq, lq_raw=[x * 0.8 for x in lq], pup=0.5,
+                   naive=lq, extra={"aci": 1.12})
+    fid = next(iter(L["pending"]))
+    fledger._finish(L, fid, L["pending"][fid], 0.01, 0.0, False, dt.date(2026, 10, 2), 100.0, 101.0, dt.date(2026, 10, 2))
+    g = L["graded"]["quant"]["1"][0]
+    assert g["pw10"] == 0.04 and g["pw90"] == 0.05 and g["aci"] == 1.12 and g["w10"] == pytest.approx(0.032)
+
+
+def test_a_decision_from_an_older_version_of_the_test_is_never_applied():
+    from tests.test_forecast import _tilt_rows
+    L = {"graded": {"quant": {"21": _tilt_rows(4000, 0.03, seed=5, n_dates=380)}}}
+    res = ml.compete(L)
+    assert res["accepted"] and ml.SignalModel.build({**res, "on": True}, L) is not None
+    old = {**res, "on": True, "model": "average", "hp": [2, ["ridge", "trees", "neural_net", "average"]]}
+    assert not ml.current(old) and ml.SignalModel.build(old, L) is None      # "average" then meant three models
+    assert ml.version(old, None) == ml.version(None, None)
+    kept = learn.tilt_gate({**res, "on": True, "passes": 2}, {**res, "accepted": False, "t": 2.0, "recent_gain": 0.01})
+    assert kept["on"] and ml.current(kept)                                  # held on a weaker week: still current
+
+
+def _realistic_null_rows(seed, n_stocks=40, months=30, every=3):
+    """Nothing predicts anything, but the record looks like a real one: signals that change slowly (so neighbouring
+    forecasts share them), one-month outcomes measured every few days (so they overlap), a shared market move with
+    fat tails, stocks with their own beta and volatility, and the S&P 500's own record."""
+    from pipeline.forecast import trading_days_after
+    rng = np.random.default_rng(seed)
+    days = trading_days_after(dt.date(2023, 1, 2), int(months * 21) + 30)
+    T, F = len(days), len(ml.FEATS)
+    m = rng.standard_t(4, T) * 0.009
+    beta = rng.uniform(0.6, 1.6, n_stocks)
+    vol = rng.uniform(0.012, 0.035, n_stocks)
+    ret = beta[None] * m[:, None] + vol[None] * rng.standard_t(3, (T, n_stocks)) / math.sqrt(3)
+    cum, mcum = np.cumsum(ret, axis=0), np.cumsum(m)
+    z = rng.normal(size=(n_stocks, F))
+    rows = []
+    for t in range(T - 22):
+        z = 0.97 * z + math.sqrt(1 - 0.97 ** 2) * rng.normal(size=(n_stocks, F))
+        if t % every:
+            continue
+        made = days[t].isoformat()
+        for s in range(n_stocks):
+            f = {k: float(z[s, j]) for j, k in enumerate(ml.FEATS)}
+            f.update(v=ml.FEAT_V, beta=float(beta[s]), lvol=float(math.log(vol[s] * math.sqrt(252))))
+            rows.append({"t": f"S{s}", "made": made, "f": f, "er": float(cum[t + 21, s] - cum[t, s])})
+        rows.append({"t": "SPY", "made": made, "f": {"v": ml.FEAT_V}, "er": float(mcum[t + 21] - mcum[t])})
+    return rows
+
+
+def test_the_competition_stays_off_on_a_realistic_record_with_nothing_to_learn():
+    for seed in (31, 32):
+        res = ml.compete({"graded": {"quant": {"21": _realistic_null_rows(seed)}}})
+        assert res["test_months"] >= 20 and not res["accepted"], (seed, res.get("t"), res.get("test_gain"))
+        assert abs(res["t"]) < res["t_needed"]
+
+
+def test_the_pick_for_a_month_uses_only_months_whose_outcomes_were_in():
+    # a 1-month forecast made on 30 January is graded in March: when March's pick is made, January isn't known yet
+    assert ml._outcome_known("2026-01-30", 21) > "2026-03-01"
+    from tests.test_forecast import _tilt_rows
+    res = ml.compete({"graded": {"quant": {"21": _tilt_rows(2400, 0.03, seed=5, n_dates=240)}}})
+    k = res["test_months"]
+    assert 4 <= k <= 12 and len(res["picks"]) == k
+    # three months must be fully graded before the record can pick: that takes the first four test months at least
+    assert res["picks"][:4] == ["average"] * 4
+
+
+def test_a_day_with_few_forecasts_moves_the_keeper_less_and_only_the_last_year_scores_it():
+    full = _keeper_rows(120, too_narrow=1.0)
+    rows = full["graded"]["quant"]["1"]
+    day = rows[-200]["made"]                                    # one day, near the end, all misses
+    few = [r for r in rows if r["made"] != day] + [{**r, "err": 0.2} for r in rows if r["made"] == day][:2]
+    many = [r for r in rows if r["made"] != day] + [{**r, "err": 0.2} for r in rows if r["made"] == day]
+    m_few = ml.coverage_keeper({"graded": {"quant": {"1": sorted(few, key=lambda r: r["made"])}}})["1d"]["m"]
+    m_many = ml.coverage_keeper({"graded": {"quant": {"1": sorted(many, key=lambda r: r["made"])}}})["1d"]["m"]
+    base = ml.coverage_keeper(full)["1d"]["m"]
+    assert m_many > m_few and abs(m_few - base) < 0.2 * abs(m_many - base)
+    k = ml.coverage_keeper(full, window_days=30)["1d"]
+    assert k["window_n"] < len(rows) and k["window_days"] == 30
+
+
+def test_calibration_doesnt_flip_on_and_off_with_a_tiny_edge(monkeypatch):
+    from tests.test_forecast import _rows
+    L = {"graded": {"quant": {"21": _rows(3000, 0.06, 0.05, seed=3, dates=300)}}}
+    # the correction scores 0.1% better on the hold-out: enough to stay on, not enough to switch back on
+    monkeypatch.setattr(learn, "_pinball3", lambda er, w10, w90, sc, sh: 1.0 if sc == 1.0 and sh == 0.0 else 0.999)
+    assert learn.calibration(L)["1m"]["status"] == "applied"                                  # first time: no worse
+    assert learn.calibration(L, prev={"1m": {"status": "applied"}})["1m"]["status"] == "applied"
+    assert learn.calibration(L, prev={"1m": {"status": "held"}})["1m"]["status"] == "held"
+    monkeypatch.setattr(learn, "_pinball3", lambda er, w10, w90, sc, sh: 1.0 if sc == 1.0 and sh == 0.0 else 0.995)
+    assert learn.calibration(L, prev={"1m": {"status": "held"}})["1m"]["status"] == "applied"   # a clear edge
+    monkeypatch.setattr(learn, "_pinball3", lambda er, w10, w90, sc, sh: 1.0 if sc == 1.0 and sh == 0.0 else 1.001)
+    assert learn.calibration(L, prev={"1m": {"status": "applied"}})["1m"]["status"] == "held"   # worse: off
+
+
+def test_the_significance_test_allows_for_slow_runs_of_luck():
+    def sqrt2_t(g):
+        a = np.asarray(g)
+        return a.mean() / (a.std(ddof=1) / math.sqrt(len(a)) * math.sqrt(2))
+    # independent months: never looser than the √2 error bar
+    iid = list(0.004 + np.random.default_rng(4).normal(0, 0.01, 24))
+    assert ml._mean_t(iid)[1] <= sqrt2_t(iid) + 1e-12
+    # good and bad months that come in slow waves: the Newey-West error bar is wider, so t is lower
+    waves = [0.004 + 0.01 * math.sin(2 * math.pi * k / 16) for k in range(32)]
+    assert ml._mean_t(waves)[1] < 0.8 * sqrt2_t(waves)
+    assert ml._mean_t([0.01]) == (0.01, 0.0) and ml._mean_t([]) == (0.0, 0.0)
+
+
+def test_the_market_holidays_by_rule_match_the_exchange():
+    from pipeline.etf import nyse_holidays
+    assert dt.date(2021, 6, 18) not in nyse_holidays(2021) and dt.date(2019, 6, 19) not in nyse_holidays(2019)
+    assert dt.date(2022, 6, 20) in nyse_holidays(2022)           # Juneteenth from 2022 (a Sunday: observed Monday)
+    assert dt.date(2018, 12, 5) in nyse_holidays(2018) and dt.date(2025, 1, 9) in nyse_holidays(2025)
+    from pipeline import forecast as F
+    assert F.FOMC[0].startswith("2016") and F.CPI[0].startswith("2016")
+    assert all(F.is_trading_day(dt.date.fromisoformat(d)) for d in F.FOMC + F.CPI)
+
+
+def test_live_and_backtest_forecasts_of_one_day_are_compared_within_their_own_set():
+    live = [{"t": f"L{i}", "made": "2026-03-02", "er": 0.05 + 0.01 * i, "f": {"v": ml.FEAT_V, "beta": 1.0}}
+            for i in range(12)]
+    bt = [{"t": f"B{i}", "made": "2026-03-02", "er": -0.05 - 0.01 * i, "f": {"v": ml.FEAT_V, "beta": 1.0}}
+          for i in range(12)]
+    L = {"graded": {"quant": {"21": live}, "quant_bt": {"21": bt}}}
+    rows = ml.rows_for(L, 21)
+    grp = ml.row_groups(rows, L, 21)
+    assert set(grp) == {"2026-03-02|q", "2026-03-02|b"}
+    _, _, y = ml.targets(rows, L, 21, grp)
+    for g in set(grp):                         # each set averages zero on its own (the two sets' levels differ)
+        assert abs(float(np.mean(y[grp == g]))) < 1e-12

@@ -256,7 +256,9 @@ def _tilt_rows(n, effect, seed, n_dates=250, market=0.05, src_feats=None, kind="
 
 
 def test_competition_accepts_a_planted_signal_and_nudges_the_right_way():
-    L = {"graded": {"quant": {"21": _tilt_rows(2500, 0.03, seed=5)}}}
+    # (the bar is strict while test months are few, and eight candidates make picking a winner noisier, so this
+    # uses two years of months)
+    L = {"graded": {"quant": {"21": _tilt_rows(4000, 0.03, seed=5, n_dates=380)}}}
     tw = learn.tilt_weights(L)
     assert tw["accepted"], tw["status"]
     assert tw["model"] in ml.CANDIDATES and set(tw["candidates"]) == set(ml.CANDIDATES)
@@ -279,7 +281,10 @@ def test_competition_picks_trees_when_the_signal_is_nonlinear_and_ridge_when_it_
     nonlin = learn.tilt_weights({"graded": {"quant_bt": {"21": _tilt_rows(6000, 0.04, seed=21, n_dates=420,
                                                                           src_feats=price, kind="nonlinear")}}})
     assert nonlin["accepted"] and nonlin["candidates"]["trees"]["gain"] > nonlin["candidates"]["ridge"]["gain"] + 0.005
-    assert nonlin["model"] in ("trees", "average", "neural_net") and nonlin["model"] != "ridge"
+    linear = ("ridge", "huber", "spline")     # (spline bends one signal at a time; this effect is a combination)
+    assert nonlin["model"] not in linear
+    assert max(nonlin["candidates"][k]["gain"] for k in ("trees", "random_forest", "catboost")) > \
+        max(nonlin["candidates"][k]["gain"] for k in linear)
     lin = learn.tilt_weights({"graded": {"quant_bt": {"21": _tilt_rows(6000, 0.02, seed=22, n_dates=420,
                                                                        src_feats=price)}}})
     assert lin["accepted"] and lin["candidates"]["ridge"]["gain"] >= lin["candidates"]["trees"]["gain"] - 0.002

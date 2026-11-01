@@ -15,6 +15,10 @@ cross-sectional 1-month reversal effect of strength K (0 = none) tests whether t
 effect and stays off when there isn't one.
 
 Usage: python3 tests/sim_learning.py <repo_root> <K> <out.json> [stocks] [days] [paths] [seed] [jump_x] [vol_step] [nonlinear]
+                                       [history_days] [backtest_days]
+history_days: simulated days before the app starts (default 760). backtest_days: how much of that history the
+backtest can see (default all of it): 760 is about what a free Massive key gives, 2760 about ten years (the deep
+history). Running the same seed and history_days with two backtest_days compares the same market and live period.
        python3 tests/sim_learning_report.py <out.json> ...   (5-30 minutes per run with the defaults)
 """
 import datetime as dt
@@ -31,6 +35,8 @@ SEED = int(sys.argv[7]) if len(sys.argv) > 7 else 7
 JUMPX = float(sys.argv[8]) if len(sys.argv) > 8 else 1.0     # earnings jumps this much bigger once the app runs
 REGIME = float(sys.argv[9]) if len(sys.argv) > 9 else 1.25   # stock volatility this much higher once the app runs
 NONLIN = int(sys.argv[10]) if len(sys.argv) > 10 else 0     # 1: the planted reversal works only in volatile stocks
+WARM = int(sys.argv[11]) if len(sys.argv) > 11 else 760      # history before the app starts
+HIST = int(sys.argv[12]) if len(sys.argv) > 12 else WARM     # of which the backtest can see this much
 sys.path.insert(0, ROOT)
 
 import inspect  # noqa: E402
@@ -43,9 +49,10 @@ try:                                                                 # version 3
 except ImportError:
     ml = None
 V3 = ml is not None
+V4 = V3 and hasattr(ml, "coverage_keeper")                            # version 4: more candidates, the keeper
+V5 = V4 and hasattr(ml, "FUSION_MIN_MONTHS")                          # version 5: the fused model, the miss record
 NEW = V3 or "bench" in inspect.signature(learn.features).parameters  # version 2 or later
 
-WARM = 760                       # history before the app starts (about three years)
 EVAL_H = (5, 21, 63)
 T = WARM + DAYS + 64
 
@@ -142,7 +149,7 @@ t0 = time.time()
 
 # walk-forward backtest over the history (like job_backtest: weekly from version 3, every 10 sessions before;
 # outcomes already known)
-for i in range(260, WARM - 1, 5 if V3 else 10):
+for i in range(max(260, WARM - HIST + 260), WARM - 1, 5 if V3 else 10):
     for j, tk in enumerate(names + [BENCH]):
         bench = tk == BENCH
         hist_i = (M[: i + 1] if bench else P[: i + 1, j]).tolist()
@@ -169,7 +176,7 @@ for i in range(260, WARM - 1, 5 if V3 else 10):
                 fledger.add_backtest(*args)
 bt_secs = time.time() - t0
 
-state = {"calib": {}, "tilt": None, "tilt_at": None, "range": None}
+state = {"calib": {}, "tilt": None, "tilt_at": None, "range": None, "keeper": None}
 evals, timeline = [], []
 pending_eval = []                    # (due index, h, version, lq, nv, i, j)
 for i in range(WARM, WARM + DAYS):
@@ -177,22 +184,26 @@ for i in range(WARM, WARM + DAYS):
     # 1. grade and learn (the pipeline does this every 6 hours; once a day here)
     fledger.grade(L, series_upto(i), market_last=ords[i], today=today, last_complete=today)
     fledger.compact(L, today)                      # what saving the ledger does after every pipeline run
-    calib = learn.calibration(L, min_n=200, min_dates=20)
+    calib = (learn.calibration(L, min_n=200, min_dates=20, prev=state.get("calib"))
+             if "prev" in inspect.signature(learn.calibration).parameters else learn.calibration(L, min_n=200, min_dates=20))
     tilt = state["tilt"]
     if state["tilt_at"] is None or (today - state["tilt_at"]).days >= 7:
         tilt = learn.tilt_gate(tilt, learn.tilt_weights(L))
         state["tilt_at"] = today
     rl = (ml.range_learner(L, calib, prev=state["range"]) if "prev" in inspect.signature(ml.range_learner).parameters
           else ml.range_learner(L, calib)) if V3 else None
-    state.update(calib=calib, tilt=tilt, range=rl)
+    keeper = ml.coverage_keeper(L, prev=state["keeper"]) if V4 else None
+    aci = ml.keeper_multipliers(keeper) if V4 else {}
+    state.update(calib=calib, tilt=tilt, range=rl, keeper=keeper)
     applied = {k: v for k, v in calib.items() if v.get("status") == "applied"}
     smodel = ml.SignalModel.build(tilt, L) if V3 else None
-    rmodel = ml.RangeModel.build(rl, calib, L) if V3 else None
+    rmodel = (ml.RangeModel.build(rl, calib, L, today=today) if V5 else ml.RangeModel.build(rl, calib, L)) if V3 else None
     day_feats = [feats_at(i, j) for j in range(N)]
     if smodel is not None and hasattr(smodel, "set_day"):
         smodel.set_day(day_feats)                  # centred on the day's stocks, as the pipeline does
     # 2. forecast every stock with what has been learned, and without (for comparison); record the learned one
-    bfc = F.build(BENCH, ords[: i + 1], M[: i + 1].tolist(), beta=1.0, paths=PATHS, calib=applied)
+    bfc = F.build(BENCH, ords[: i + 1], M[: i + 1].tolist(), beta=1.0, paths=PATHS,
+                  calib=ml._keep(applied, aci) if V4 else applied)
     if bfc:
         bf = bench_feats_at(i)
         for name, h in F.HORIZONS:
@@ -207,7 +218,9 @@ for i in range(WARM, WARM + DAYS):
             def build(calib, tilt_ret, tilt_days, tilt_parts, tk=tk, hist=hist, j=j):
                 return F.build(tk, ords[: i + 1], hist, beta=float(beta[j]), paths=PATHS, calib=calib,
                                tilt_ret=tilt_ret, tilt_days=tilt_days, tilt_parts=tilt_parts)
-            fc, tr = ml.forecast_with_learning(build, feats, applied, smodel, rmodel)
+            fc, tr = (ml.forecast_with_learning(build, feats, applied, smodel, rmodel, aci, t=tk) if V5
+                      else ml.forecast_with_learning(build, feats, applied, smodel, rmodel, aci) if V4
+                      else ml.forecast_with_learning(build, feats, applied, smodel, rmodel))
         else:
             tr, parts, td = learn.tilt_for(tilt, feats)
             fc = F.build(tk, ords[: i + 1], hist, beta=float(beta[j]), paths=PATHS, calib=applied, tilt_ret=tr, tilt_days=td)
@@ -216,7 +229,11 @@ for i in range(WARM, WARM + DAYS):
         base = fc if not tr else F.build(tk, ords[: i + 1], hist, beta=float(beta[j]), paths=PATHS)
         for name, h in F.HORIZONS:
             hz = fc["horizons"][name]
-            extra = {"tl": hz["tilt"]} if hz.get("tilt") else None
+            extra = {"tl": hz["tilt"]} if hz.get("tilt") else {}
+            kp = ((fc.get("calib") or {}).get(name) or {}).get("keep")
+            if kp or aci.get(name):
+                extra["aci"] = kp or round(aci[name], 4)        # the keeper's factor it was published with
+            extra = extra or None
             fledger.record(L, "quant", tk, fc["made"], h, hz["lq"], lq_raw=hz["lq_raw"], pup=hz["p_up"],
                            naive=F.naive_lq(fc["naive_sigma_d"], h),
                            feats=ml.row_features(feats, fc, name) if V3 else feats, extra=extra)
@@ -230,9 +247,12 @@ for i in range(WARM, WARM + DAYS):
                                    for k, v in calib.items() if k in ("1w", "1m", "3m")},
                          "range": {k: {x: v.get(x) for x in ("status", "holdout_gain_vs_single", "scale_spread", "n")}
                                    for k, v in (rl or {}).items()},
+                         "keeper": {k: {x: v.get(x) for x in ("status", "m", "replay_gain", "cov80_with", "cov80_without",
+                                                              "days")} for k, v in (keeper or {}).items()},
                          "tilt": {x: (tilt or {}).get(x) for x in ("on", "status", "t", "test_gain", "recent_gain",
                                                                     "test_months", "n", "months", "weights", "model",
-                                                                    "candidates", "best")}})
+                                                                    "candidates", "best", "fusion", "fusion_months",
+                                                                    "fusion_waiting")}})
     if (i - WARM) % 50 == 0:
         print(f"K={K} day {i - WARM}/{DAYS} {time.time() - t0:.0f}s tilt_on={bool((tilt or {}).get('on'))}", flush=True)
 
@@ -243,6 +263,6 @@ for due, h, ver, lq, nv, i, j in pending_eval:
     r = math.log(P[due, j] / P[i, j])
     evals.append({"m": (i - WARM) // 21, "h": h, "v": ver, **scores(lq, r, nv)})
 
-json.dump({"K": K, "JUMPX": JUMPX, "REGIME": REGIME, "NONLIN": NONLIN, "V3": V3, "NEW": NEW, "N": N, "DAYS": DAYS, "PATHS": PATHS, "seed": SEED, "bt_secs": round(bt_secs, 1),
+json.dump({"K": K, "JUMPX": JUMPX, "REGIME": REGIME, "NONLIN": NONLIN, "V3": V3, "V4": V4, "V5": V5, "WARM": WARM, "HIST": HIST, "NEW": NEW, "N": N, "DAYS": DAYS, "PATHS": PATHS, "seed": SEED, "bt_secs": round(bt_secs, 1),
            "secs": round(time.time() - t0, 1), "evals": evals, "timeline": timeline}, open(OUT, "w"))
 print("done", OUT, round(time.time() - t0), "s")

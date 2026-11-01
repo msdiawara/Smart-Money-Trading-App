@@ -17,7 +17,7 @@ def test_clean_name_and_query():
     assert "(stock OR" not in N.gdelt_query("Advanced Micro Devices Inc", "AMD")       # specific enough already
     assert '"GE"' not in (N.gdelt_query("General Electric Co", "GE") or "")            # too-short tickers left out
     assert N.gdelt_query(None, "X") is None
-    assert "maxrecords=40" in N.gdelt_url(q) and "timespan=7d" in N.gdelt_url(q)
+    assert "maxrecords=250" in N.gdelt_url(q) and "timespan=7d" in N.gdelt_url(q)
 
 
 def test_parse_gdelt_ranks_reputable_dedupes_and_reads_errors():
