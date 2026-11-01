@@ -58,7 +58,8 @@ Last researched and audited: 1 Nov 2026. The *Audit log* at the bottom records h
 | | |
 |---|---|
 | Daily history | **Massive** (formerly Polygon.io) free Basic plan: the *grouped daily* endpoint returns every US stock's end-of-day bar in one request (5 requests/min, past days only, ~2 years). It backfills in a few hours, then needs one request per night. This powers volatility, drawdown, beta, 52-week range and every win-rate calculation |
-| Latest price | **Alpaca** free account: IEX real-time snapshots, labelled *indicative* (IEX is ~2–3% of volume). The audit found Alpaca's paper-only accounts get **IEX data only**, so full-market SIP data isn't relied on. Without Alpaca, a rotating set of tickers is refreshed from Yahoo's unofficial chart endpoint (labelled as such), and otherwise the last close is shown |
+| Deep history (for the backtest) | **Alpaca** free Basic plan, historical bars back to 2016 from all US exchanges (the consolidated SIP feed, free for everything but the latest 15 minutes), 200 requests/min. Built once: Alpaca's asset list (listed stocks and ETFs, and the inactive ones it knows) plus, with the Massive key, every stock, ADR, ETF and ETN Massive's reference list shows as delisted since 2016 (`/v3/reference/tickers?active=false`; Alpaca has no list of older delistings). Those whose company still trades on a main exchange under a new ticker (same SEC CIK, from the SEC's ticker file) are left out, since their bars come with the new ticker. A monthly sweep keeps every stock that traded at least $100M in some month (a net wide enough for every stock the backtest could pick on any date, so the choice never depends on how a stock did later), then their split-adjusted daily bars are fetched (`/v2/stocks/bars`, `feed=sip`, `adjustment=split`; delisted ones with `asof` set to the month before they went, so a reused ticker isn't mixed up). Only the backtest reads it; nothing from it is published |
+| Latest price | **Alpaca** free account: IEX real-time snapshots, labelled *indicative* (IEX is ~2–3% of volume). The free plan's *real-time* data is IEX only; its full-market SIP data is free only once it's 15 minutes old, which suits the deep history above but not a live price. Without Alpaca, a rotating set of tickers is refreshed from Yahoo's unofficial chart endpoint (labelled as such), and otherwise the last close is shown |
 | Splits | **Massive** `/stocks/v1/splits` (included in every plan, 2 years of history on the free plan, updated daily; the older `/v3/reference/splits` is deprecated). The app records the day each price row was downloaded and re-bases only rows fetched before a split, verifying against the first post-split day, so a split never looks like a crash in risk meters or win rates |
 | Size / profitability | SEC XBRL **frames** API: one request returns a concept for every company (shares outstanding, net income) |
 
@@ -104,21 +105,33 @@ Last researched and audited: 1 Nov 2026. The *Audit log* at the bottom records h
 ## 12. Valuation, news and forecast inputs added in round five
 | | |
 |---|---|
-| **SEC company facts (financials)** | `data.sec.gov/api/xbrl/companyfacts/CIK##########.json`: every XBRL fact a company has reported in its 10-Ks and 10-Qs, each with its period, form and filing date. Official and free, under the same fair-access rules as the rest of EDGAR (declared `User-Agent` with contact e-mail; the app stays under 8 requests/second across all SEC hosts). US GAAP concepts first, IFRS (`ifrs-full`) for foreign filers that use it; US-dollar facts only. Up to 150 companies per half-hour run, so the full set loads within the first day; a company's facts are re-fetched when it files a new 10-Q/10-K, or every 30 days |
+| **SEC company facts (financials)** | `data.sec.gov/api/xbrl/companyfacts/CIK##########.json`: every XBRL fact a company has reported in its 10-Ks and 10-Qs, each with its period, form and filing date. Official and free, under the same fair-access rules as the rest of EDGAR (declared `User-Agent` with contact e-mail; the app stays under 8 requests/second across all SEC hosts). US GAAP concepts first, IFRS (`ifrs-full`) for foreign filers that use it; US-dollar facts only. Up to 150 companies per half-hour run, so the full set loads within the first day; a company's facts are re-fetched when it files a new 10-Q/10-K, or every 30 days. Since round nine, revenue growth, operating margin, free-cash-flow yield and share issuance from the latest statements filed before a forecast's date are forecast signals |
 | **SEC submissions** | `data.sec.gov/submissions/CIK##########.json`: industry code (SIC), all tickers and share classes, first filing date (firm age for the bubble checklist), share offerings (S-1/S-3/424B) over 12 months, and every 8-K with its item numbers. Re-fetched every 3 days, or sooner when a new filing appears in the live feed |
-| **8-K material events** | Item numbers come from the SEC itself (submissions `items`), not from parsing text, and are labelled in plain English. The live EDGAR feed (`type=8-K`) is polled so a new 8-K shows up within minutes. Red flags: 1.03 bankruptcy, 2.04 accelerated debt, 3.01 delisting notice, 4.02 non-reliance on past financial statements |
-| **Headlines: the GDELT Project** | DOC 2.0 API (`api.gdeltproject.org/api/v2/doc/doc`, `mode=ArtList`), free and without a key. GDELT's terms allow any use, commercial included, with a citation and link back to GDELT, which every stock page shows. Searched by company name in English-language sources, reputable financial outlets listed first. GDELT asks for at most one request every 5 seconds and answers rate limits as plain text with HTTP 200, which the app detects and backs off from |
+| **8-K material events** | Item numbers come from the SEC itself (submissions `items`), not from parsing text, and are labelled in plain English. The live EDGAR feed (`type=8-K`) is polled so a new 8-K shows up within minutes. Red flags: 1.03 bankruptcy, 2.04 accelerated debt, 3.01 delisting notice, 4.02 non-reliance on past financial statements. Since round nine, 8-Ks with a material item in the 10 days before a forecast's close, and any red flag in the 90 days before, are forecast signals too |
+| **Headlines: the GDELT Project** | DOC 2.0 API (`api.gdeltproject.org/api/v2/doc/doc`, `mode=ArtList`), free and without a key. GDELT's terms allow any use, commercial included, with a citation and link back to GDELT, which every stock page shows. Searched by company name in English-language sources, reputable financial outlets listed first. GDELT asks for at most one request every 5 seconds and answers rate limits as plain text with HTTP 200, which the app detects and backs off from. Each check asks for up to 250 articles (GDELT's most), and the page shows the best 8. Since round nine the headlines also feed two forecast signals: how many distinct headlines GDELT had seen in the week before the app's last check before a forecast's close, and their tone from a short word list (METHODS section 9). For that the app keeps, for each of the last few checks, only the count, the average tone and whether the answer was full, not the articles |
 | **Massive news (not used)** | Massive's `/v2/reference/news` is in its plans, but individual plans are a personal, non-display licence and this app's website is public, so the app doesn't fetch it at all |
-| **Event calendar** | FOMC decision dates from the Federal Reserve's published meeting calendar and CPI release dates from the BLS schedule (built in through 2027; extra dates can be added in `config/config.yaml`); next earnings from Alpha Vantage if connected, otherwise estimated from the company's quarterly filing rhythm and labelled "estimated" |
+| **Event calendar** | FOMC decision dates from the Federal Reserve's meeting calendars and tentative-schedule releases, and CPI release dates from the BLS archive and schedules, built in from 2016 (for the backtest) through 2027; extra dates can be added in `config/config.yaml`. The two emergency Fed decisions of March 2020 are included (the Sunday one on the next session), as are the two CPI reports released on Good Friday (on the next session). Next earnings from Alpha Vantage if connected, otherwise estimated from the company's quarterly filing rhythm and labelled "estimated" |
 | **Prices for forecasts** | The same split-adjusted daily history that powers the risk meters (section 6), so a split never looks like a crash in the model, the backtest or the grading |
 | **Fonts** | IBM Plex Sans (SIL Open Font License 1.1), bundled with the app so it works offline; the licence is in `web/fonts/OFL.txt` |
+
+## 13. Long price history for the learning (researched 1 Nov 2026)
+The learners' tests need many independent months, so the free sources of long daily history were compared:
+| Source | Free history | Coverage | Verdict |
+|---|---|---|---|
+| **Alpaca** Basic plan | back to 2016, 200 requests/min | US stocks and ETFs; its asset list has only the delisted stocks it once traded, so Massive's reference list fills in the rest | **Used**: the deep history (section 6) |
+| **Massive** Basic plan | 2 years, end of day | every US stock, one request per day | Used: the main daily history |
+| **SEC Insider Transactions Data Sets** | 2006 to now, quarterly, public domain | every Form 3/4/5 | Used for insider win rates (section 7). The next step for the learning: historical insider-buying signals for the backtest, which first needs a complete store of live insider trades so the live and historical definitions match |
+| MarketParquet | the last ~365 days free; the full archive back to 2000, delisted stocks included, for a one-time $79 | US stocks, ETFs, futures | Not used (paid); the simplest upgrade beyond 2016 |
+| Tiingo free plan | decades per stock | 500 different symbols a month | Too few symbols for a whole-market backtest |
+| Stooq | decades, as free bulk downloads | stocks, ETFs, indices, many markets | No API (CSV files only), so it can't be refreshed automatically |
+| Yahoo Finance | decades per stock | listed stocks only | Unofficial and drops delisted stocks, so a backtest on it is flattered by survivors; used only as the per-stock fallback |
 
 ## Audit log
 How the data choices were checked (30 Oct 2026):
 
 1. **Primary-source research.** I researched each data category against official documentation first (SEC EDGAR fair-access and API pages, SEC filing calendars and 13D/G rule changes, the House Clerk and Senate eFD sites, and the eToro, Alpaca, Massive, OpenFIGI, ntfy and GitHub docs), then compared third-party alternatives on freshness, cost and reliability. Aggregators were rejected wherever an official source is reachable, because they can't be fresher than the source.
 2. **Independent audit.** A separate research agent that hadn't seen my reasoning re-verified 20 specific claims plus all 27 fund CIKs against primary sources, looking for contradictions. Result: 9 verified as written, 3 contradicted, the rest partly right or unconfirmed. Every correction was applied:
-   * Alpaca paper accounts get IEX-only data → history moved to Massive's whole-market endpoint; Alpaca now only supplies an *indicative* real-time price.
+   * Alpaca paper accounts get IEX-only data → history moved to Massive's whole-market endpoint; Alpaca now only supplies an *indicative* real-time price. (Refined 1 Nov 2026: that holds for real-time data; Alpaca's free plan does serve full-market SIP bars once they're 15 minutes old, which the deep history uses.)
    * eToro API not currently offered to US clients, and its terms forbid redistribution → integration ships disabled.
    * Senate eFD returned 403 to GitHub Actions for a full week → Quiver documented as the dependable fallback; Quiver's auth header corrected to `Token`.
    * SEC moved the insider data-set path in 2026 → new path first, old path as fallback.
@@ -319,5 +332,141 @@ How the data choices were checked (30 Oct 2026):
        that bends, improving every quarter (1-month forecasts by 4.1% and 2.7%, against 3.9% and 2.0% before);
      * with bigger earnings jumps than in the history, the range learner improved 1-week and 1-month forecasts by about
        1.8%, where the previous version changed nothing.
+
+13. **Eighth round: more algorithms, a coverage keeper and ten years of prices, audited four times (1 Nov 2026).**
+   * *Change:* four candidates joined the signal learner's competition: robust (Huber) regression, spline regression, a
+     random forest and CatBoost (eight, with the average). A third learner, the coverage keeper (adaptive conformal
+     inference), adjusts range widths after each day's results. With free Alpaca keys the backtest reaches back to 2016
+     (the deep history, section 6), with stocks delisted since then from Massive's reference list. The Fed and CPI
+     calendar now starts in 2016 to match.
+   * *Research:* free sources of long whole-market price history were compared (section 13). Alpaca's free plan is the
+     only one found that is free, automatable and covers every US stock back to 2016; the SEC's insider data sets
+     (2006 on) are the next step for the learning.
+   * *Audit 1 (independent statistics review of the learners):*
+     * the keeper's multiplier replaced the calibration of a horizon that had none of its own instead of multiplying
+       it, and leaked into neighbouring horizons;
+     * the algorithm chosen for a month used the month just before it, whose outcomes weren't all in yet;
+     * the significance test's error bar missed slower runs of luck;
+     * live and backtest forecasts of the same day were centred together, though they're different sets of stocks;
+     * the spline's penalty was six times too weak for its six curve pieces, and missing values piled up on one knot;
+     * the keeper gave a half-empty day full weight and scored every year of its replay equally;
+     * calibration could switch on and off from one day to the next.
+
+     All fixed: the keeper is its own factor, the choice uses only months whose outcomes were in, the error bar is
+     also estimated with Newey-West, centring is per day and source, and calibration switches back on only with a
+     0.2% edge. A realistic no-signal test (slow-moving signals, overlapping outcomes, fat tails) now runs with the
+     suite.
+   * *Audit 2 (independent review of the deep history and the backtest):*
+     * Alpaca has no list of companies delisted before it knew them (the docs said it had), so delisted stocks now
+       come from Massive's reference list, asked for as of the month before they went;
+     * on older dates the filing record doesn't reach, filing-based earnings dates meant no earnings at all (now
+       volume-spike estimates there, using only spikes up to that date);
+     * the Fed and CPI calendar began in 2024; the NYSE holiday rules counted Juneteenth before 2022 and missed the
+       two national days of mourning;
+     * a long gap in a ticker's prices could join two companies' histories;
+     * an Alpaca error that wasn't about one symbol still split the batch, a (nearly) empty download could be marked
+       complete, and the matrix on disk wasn't tied to the build that made it;
+     * the backtest made rows older than the record keeps (dropped at the next save);
+     * on split-adjusted prices, the $5 floor kept out stocks that have split since.
+
+     All fixed.
+   * *Audit 3 (independent app review):* a broken CatBoost install would have stopped the whole pipeline; a learner
+     decision made by an older version of the test was shown as on; the suite ran the full-size models (it now runs
+     light ones, with one test of the full settings); the deep history had no row on the Data tab, ran every
+     refresh, failed silently and read its arrays every run. All fixed.
+   * *Audit 4 (independent check of the fixes):* confirmed the learner fixes and found nine more problems, all in the
+     deep history:
+     * keeping each year's 2,500 most traded stocks used how much they traded later, a look-ahead that kept the stocks
+       that went on to do well. Now every stock that traded $100M in some month is kept: a net wide enough for every
+       stock the backtest could pick on any date, so the pick depends only on what was known then;
+     * a bankrupt company whose stock moved over the counter counted as renamed, and vanished;
+     * one error from Massive ended its delisted list early;
+     * a hole could open between the deep weeks and the Massive weeks as the Massive history grows;
+     * a network error could store part of the Massive key in the build's progress file;
+     * a damaged file was never fetched again;
+     * delisted ADRs and ETNs were left out;
+     * a failed sweep was retried every hour, forever;
+     * without the SEC's ticker list, a renamed company could be counted twice.
+
+     All fixed. Every finding of this audit, and the main ones of the first three, is pinned by a test in
+     `tests/test_deep.py`, `tests/test_ml.py` or `tests/test_review3.py`.
+   * *Simulation check* (METHODS section 9 has the full table): the four simulated markets of round seven, with the
+     previous version and this one, every forecast also made without learning:
+     * with no real signal, the signal learner never switched on;
+     * with a straight-line signal, robust (Huber) regression won every week and 3-month forecasts improved 6.4%
+       (5.9% before); with one that bends, the average won most weeks and CatBoost the rest (1 month: 2.4%, against
+       2.7% before);
+     * with bigger earnings jumps than in the history, forecasts improved in every quarter at all three horizons;
+     * a weak signal was measured as harmful with two years of backtest and as helpful with ten (both stayed off: at
+       t 1.0–1.9 it isn't clear enough to act on).
+14. **Ninth round: a Results tab, a fused model, and news, filings and financial statements as inputs, audited three
+    times (1 Nov 2026).**
+   * *Change:* a Results tab grades every forecast against what happened and takes every miss apart (market, earnings,
+     a one-day shock, volatility or trend), with what the learning loop does about each kind of miss. A ninth
+     candidate, the fused model, averages the three algorithms with the best record so far and can be put in use after
+     nine test months as a fusion. Headlines (GDELT), 8-K filings and the latest financial statements became signal
+     learner inputs, and each stock's own record of misses (and of misses caused by earnings) range learner inputs.
+   * *Audit 1 (independent review of the learning changes)* found ten problems:
+     * SEC acceptance times are New York time with a misleading "Z", so an 8-K filed after the close counted as known
+       at it;
+     * the headline count depended on news after the close (GDELT's answer holds only the newest articles, and a
+       check after the close let later ones push earlier ones out);
+     * the nine-month rule held back the fused model from use but not from the month-by-month choices the test
+       scores, so the test could pass on months the deployed model never had;
+     * a range-learner decision from the previous release counted as "already on", lowering the bar to switch on;
+     * the miss record took an outcome as known by the calendar, though a stock with gaps is graded later;
+     * filing signals were zero, not blank, for companies without a filing record;
+     * the statements' date came from a different record than their numbers;
+     * cached forecasts were rebuilt whenever the would-be fused trio changed, even when it wasn't in use;
+     * the fold cache and the decision check didn't cover the list of signals;
+     * a CatBoost failure at fit time was dropped silently inside the fused model, and scored as a zero gain in the
+       test.
+   * *Audit 2 (independent review of the Results tab)* found twelve:
+     * backtest misses were taken apart with the live price history, so the deep history's years were marked
+       "no prices" for good;
+     * the win rate came from the sample the ledger keeps, not every graded forecast, so it disagreed with the
+       Records tab;
+     * backtest misses used the S&P 500's move, not its surprise;
+     * Claude's misses assumed a beta of 1;
+     * the lists were cut across horizons before the page filtered them, hiding the slower horizons' misses;
+     * misses not yet taken apart were counted as "no data" in one view and left out in another;
+     * the "what changes" text claimed learners at horizons where they don't run, and applied the model's corrections
+       to Claude's misses;
+     * the month chart ignored the horizon filter;
+     * a one-off volume spike counted as an earnings day;
+     * nothing used the breakdown to improve forecasts;
+     * a passing failure was stored as a permanent "no data";
+     * and small wording, rounding and loading problems (the page's data was fetched on every app start).
+
+     All of both audits' findings were fixed: SEC times are read as New York time; the news signals come from the last
+     news check before the close; the nine-month rule applies to the tested choices, and the algorithm put in use must
+     also pass on its own record; versions, dates and blanks are handled as described; the page counts every graded
+     forecast from the monthly totals, keeps each horizon's newest misses, counts the undone ones apart, estimates
+     beta from prices, accepts only spikes with a quarterly rhythm (marked as estimated), retries misses that lacked
+     prices, and loads only when its tab is opened. The breakdown now feeds the range learner (each stock's share of
+     misses caused by earnings). Each finding is pinned by a test in `tests/test_review.py`.
+   * *Audit 3 (independent check of the fixes)* confirmed 15 of the 22 fixes, found 7 partly done, and found new
+     problems:
+     * the earnings-miss input wasn't point-in-time: the volume spikes standing in for earnings days were picked with
+       later spikes in view;
+     * on a weaker but still positive week, the signal learner kept running a model that week's test hadn't measured;
+     * the "likely" interval and the "expected" direction were computed on different forecasts than the rates shown
+       beside them;
+     * a red flag older than a company's 30 newest 8-Ks (all the SEC's list keeps) was missed;
+     * a saved copy of the results could be shown as the latest;
+     * a CatBoost that kept failing would have stopped the weekly test for good;
+     * a run without the stocks' context would have stored half-done diagnoses for good.
+
+     All fixed, with tests. The simulations then found one more: shrinking a stock's earnings-miss rate toward the
+     record's rate made it a stand-in for how long the stock had been followed (ranges at 1 month came out too wide);
+     it is now shrunk toward zero.
+   * *Simulation check* (METHODS section 9 has the full table): the four simulated markets of rounds seven and
+     eight, re-run with this version, every forecast also made without learning:
+     * with no real signal, the signal learner never switched on, and the worst quarter was −0.2% (−0.7% before);
+     * with a straight-line signal, forecasts improved in every quarter (3 months: 6.5%); robust regression won every
+       week and the fused model came second (+6.47% a month on unseen months, against +6.55%);
+     * with a signal that bends, every quarter improved (3 months: 4.3%); the average of all won most weeks and the
+       fused model, which had picked the three algorithms that can bend, came second (+5.60% against +5.69%);
+     * with bigger earnings jumps than in the history, forecasts improved in every quarter at all three horizons.
 
 Still unconfirmed (and handled defensively): which FMP plan includes Senate data; Tiingo/Finnhub limits (not used); the EDGAR feed's maximum page size (the app uses 100); whether `AFF10B5ONE` appears in every data-set file (optional column); the exact file names of five of ARK's six holdings files and ARK's website terms (see section 11).

@@ -148,13 +148,31 @@ def build_context(settings, state: dict, panel, store, tick: dict, prio: list[st
         bub_feat = bub if ins_cut == ins else valuation.bubble_risk(stats, v, sub, ins_cut, ai, (theme or {}).get("level"))
         fl = news.filings_for(rec, nc["live_8k"], cik) if cik else []
         flags = news.red_flags(fl)
-        hl = ((nc["by_ticker"].get(t) or {}).get("items") or [])[:8]
+        nrec = nc["by_ticker"].get(t) or {}
+        hl = (nrec.get("items") or [])[:8]
         ctx[t] = {"name": quotes[t].get("name") or sub.get("name"), "val": v, "bubble": bub, "ai": ai,
                   "filings": fl, "flags": flags, "headlines": hl, "industry": sub.get("sic_desc"),
-                  "first_filed": sub.get("first_filed"), "headlines_fetched": (nc["by_ticker"].get(t) or {}).get("fetched"),
+                  "first_filed": sub.get("first_filed"), "headlines_fetched": nrec.get("fetched"),
+                  "news_sigs": nrec.get("sigs"),
+                  # the 8-K list is trusted for the forecast signals only with a recent filing record (no CIK, or a
+                  # record not refreshed for a week, means "unknown", not "no filings")
+                  "filings_at": (rec or {}).get("sub_fetched") if cik and sub else None,
+                  # every 8-K the record holds (the page shows 12), and where that record stops: the SEC list keeps a
+                  # company's newest 30, so for a frequent filer older ones are unknown, not absent
+                  "filings_feat": news.filings_for(rec, nc["live_8k"], cik, limit=100) if cik else [],
+                  "filings_from": (min((k.get("d") or "9999") for k in sub.get("k8") or [])
+                                   if len(sub.get("k8") or []) >= 30 else None),
                   "past_earnings": news.earnings_dates(sub.get("k8") or []),
                   "feat": {"val": (v or {}).get("rich_pctl"), "val_date": (v or {}).get("price_date"),
-                           "val_filed": ((sub.get("periodic") or {}).get("filed") or None),
+                           # the newest filing the numbers could include (the facts and the filing list refresh
+                           # on their own clocks: the later of the two)
+                           "val_filed": max([d for d in ((sub.get("periodic") or {}).get("filed"),
+                                                         ((rec or {}).get("m") or {}).get("filed_max")) if d] or [None]),
+                           # the statement signals need the facts' own newest filing date (facts fetched before
+                           # this version don't have it until they're fetched again, within 30 days)
+                           "stmt_filed": (max([d for d in ((sub.get("periodic") or {}).get("filed"),
+                                                           ((rec or {}).get("m") or {}).get("filed_max")) if d])
+                                          if ((rec or {}).get("m") or {}).get("filed_max") else None),
                            "bub": bub_feat.get("score") if (stats or v) else None},
                   "earnings_when": news.earnings_when(sub.get("k8") or [])}
         q = quotes[t]
@@ -304,7 +322,8 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
     lr = state.get("learn") or {}
     calib = {k: v for k, v in (lr.get("calib") or {}).items() if v.get("status") == "applied"}
     tilt = learn.tilt_in_force(lr, now_utc())
-    cv = _calib_version(calib, tilt) + ml.version(tilt, lr.get("range"))
+    aci = ml.keeper_multipliers(lr.get("keeper"))          # the coverage keeper, per horizon (where it's on)
+    cv = _calib_version(calib, tilt) + ml.version(tilt, lr.get("range"), lr.get("keeper"))
     models: dict = {}
     failed: list[str] = []
     memo: dict = {}
@@ -322,16 +341,16 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
                     # average over the stocks the record follows (the same kind of group it was trained on)
                     day = [f for f in (feats_for(t) for t in ledger_set if t != BENCH) if f]
                     models["s"].set_day([f[-1] for f in day])
-                elif (tilt or {}).get("on") and (tilt or {}).get("accepted") and tilt.get("fv") == ml.FEAT_V \
-                        and tilt.get("model") in ml.CANDIDATES:
+                elif (tilt or {}).get("on") and (tilt or {}).get("accepted") and ml.current(tilt):
                     failed.append("signal")             # on, but its record isn't here (a lost ledger cache, say)
             except Exception as err:  # noqa: BLE001
                 log.warning("signal learner: %s", err)
                 models["s"] = None
                 failed.append("signal")
             try:
-                models["r"] = ml.RangeModel.build(lr.get("range"), lr.get("calib") or {}, L)
-                if models["r"] is None and any(v.get("status") == "applied" for v in (lr.get("range") or {}).values()):
+                models["r"] = ml.RangeModel.build(lr.get("range"), lr.get("calib") or {}, L, today=anchor_day)
+                if models["r"] is None and any(v.get("status") == "applied" and v.get("v") == ml.RANGE_V
+                                               for v in (lr.get("range") or {}).values()):
                     failed.append("range")
             except Exception as err:  # noqa: BLE001
                 log.warning("range learner: %s", err)
@@ -377,7 +396,8 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
                     stance = _claude_stance_asof(cfc.get(t), fch.get(t), cut)
                     evs0 = [{**e, "score": e.get("score0", e.get("score"))} for e in events_by_t.get(t, [])]
                     memo[t] = (dates, closes, last, learn.features(evs0, quotes.get(t) or {}, val_feat, bub_feat,
-                                                                   stance, closes, _bench_on(dates, bmap), vols))
+                                                                   stance, closes, _bench_on(dates, bmap), vols,
+                                                                   ml.context_features(x, cut, last.isoformat())))
         return memo[t]
     built = recorded = skipped_stale = held = degraded = 0
     held_list: list[str] = []
@@ -432,12 +452,12 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
         try:
             sm, rm = learners()
             # the S&P 500 gets no stock-versus-stock nudge (it isn't in what the learner was trained or centred on)
-            fc, _ = ml.forecast_with_learning(build, feats, calib, None if t == BENCH else sm, rm)
+            fc, _ = ml.forecast_with_learning(build, feats, calib, None if t == BENCH else sm, rm, aci, t=t)
         except Exception as err:  # noqa: BLE001 – a learner failing on one stock: forecast it without the learners
             log.warning("forecast %s with the learners: %s", t, err)
             plain = True
             try:
-                fc = build(calib=calib, tilt_ret=0.0, tilt_days=21, tilt_parts=[])
+                fc = build(calib=ml._keep(calib, aci), tilt_ret=0.0, tilt_days=21, tilt_parts=[])
             except Exception as err2:  # noqa: BLE001 – one stock's bad data must not stop the rest
                 log.warning("forecast %s: %s", t, err2)
                 continue
@@ -454,6 +474,9 @@ def job_forecasts(settings, state: dict, store, budget, ctx: dict, prio: list[st
                 extra = {"tl": hz["tilt"]} if hz.get("tilt") else {}
                 if h == 63:
                     extra["pd"] = hz.get("p_dd20")
+                kp = ((fc.get("calib") or {}).get(name) or {}).get("keep")
+                if kp:
+                    extra["aci"] = kp                  # the keeper's factor this range was published with
                 recorded += fledger.record(L, "quant", t, fc["made"], h, hz["lq"], lq_raw=hz["lq_raw"], pup=hz["p_up"],
                                            naive=forecast.naive_lq(fc["naive_sigma_d"], h),
                                            feats=ml.row_features(feats, fc, name),
@@ -488,28 +511,45 @@ def _utc_iso(s: str | None) -> str | None:
 _PLAIN = __import__("re").compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
 
-def earnings_proxy(c: np.ndarray, v: np.ndarray | None, dates: np.ndarray) -> list[str]:
-    """Likely past earnings days from the price history alone (for stocks with no filing record, delisted ones
-    included): a volume spike of 3× the prior month's median with a move twice the usual size, at most one per
-    ~40 sessions. Only used by the backtest, so it models earnings risk like the live forecasts do."""
+def earnings_spikes(c: np.ndarray, v: np.ndarray | None, dates: np.ndarray) -> list[tuple[float, int, str]]:
+    """Candidate earnings days from the price history alone: a volume spike of 3× the prior month's median with a
+    move twice the usual size, as (spike size, position among the valid days, date)."""
+    from numpy.lib.stride_tricks import sliding_window_view
     if v is None:
         return []
     ok = np.isfinite(c) & (c > 0) & np.isfinite(v)
     idx = np.flatnonzero(ok)
     if len(idx) < 80:
         return []
-    cc, vv = c[idx], v[idx]
-    r = np.abs(np.diff(np.log(cc)))
-    cands = []
-    for k in range(60, len(r)):
-        mv, mr = float(np.median(vv[k - 20:k + 1])), float(np.median(r[k - 60:k]))
-        if mv > 0 and mr > 0 and vv[k + 1] >= 3 * mv and r[k] >= 2 * mr:
-            cands.append((vv[k + 1] / mv, k + 1))
+    cc, vv = c[idx], v[idx].astype(float)
+    r = np.abs(np.diff(np.log(cc.astype(float))))
+    ks = np.arange(60, len(r))
+    if not len(ks):
+        return []
+    mv = np.median(sliding_window_view(vv, 21)[ks - 20], axis=1)      # volumes of the 21 days ending at k
+    mr = np.median(sliding_window_view(r, 60)[ks - 60], axis=1)       # moves of the 60 days before k
+    hit = (mv > 0) & (mr > 0) & (vv[ks + 1] >= 3 * mv) & (r[ks] >= 2 * mr)
+    return [(float(vv[k + 1] / m), int(k + 1), dt.date.fromordinal(int(dates[idx[k + 1]])).isoformat())
+            for k, m in zip(ks[hit], mv[hit])]
+
+
+def pick_spikes(cands: list[tuple[float, int, str]], upto: str | None = None) -> list[str]:
+    """The biggest spikes first, at most one per ~40 sessions, among those on or before `upto` (so a later, bigger
+    spike can't push out one the forecast should have seen)."""
     picked: list[int] = []
-    for _, k in sorted(cands, reverse=True):
+    out = []
+    for size, k, day in sorted((x for x in cands if upto is None or x[2] <= upto), reverse=True):
         if all(abs(k - j) >= 40 for j in picked):
             picked.append(k)
-    return sorted(dt.date.fromordinal(int(dates[idx[k]])).isoformat() for k in picked)
+            out.append(day)
+    return sorted(out)
+
+
+def earnings_proxy(c: np.ndarray, v: np.ndarray | None, dates: np.ndarray, upto: str | None = None) -> list[str]:
+    """Likely past earnings days from the price history alone (for stocks with no filing record, delisted ones
+    included): a volume spike of 3× the prior month's median with a move twice the usual size, at most one per
+    ~40 sessions. Only used by the backtest, so it models earnings risk like the live forecasts do."""
+    return pick_spikes(earnings_spikes(c, v, dates), upto)
 
 
 def _beta_at(c: np.ndarray, spy: np.ndarray, i: int, n: int = 252) -> float | None:
@@ -522,12 +562,33 @@ def _beta_at(c: np.ndarray, spy: np.ndarray, i: int, n: int = 252) -> float | No
     return float(np.cov(ra, rb)[0, 1] / vb) if vb > 0 else None
 
 
+def _weekly_rows(panel, lo: int, hi: int, skip_week=None) -> list[int]:
+    """The last session of each calendar week among rows lo..hi-1 (newest first)."""
+    wk: dict = {}
+    for i in range(lo, hi):
+        w = dt.date.fromordinal(int(panel.dates[i])).isocalendar()[:2]
+        if w != skip_week:
+            wk[w] = i
+    return sorted(wk.values(), reverse=True)
+
+
+def _last_rows(panel) -> dict[str, int]:
+    out = {}
+    for t, j in panel.col.items():
+        col = panel.close[:, j]
+        nz = np.flatnonzero(np.isfinite(col) & (col > 0))
+        out[t] = int(nz[-1]) if len(nz) else -1
+    return out
+
+
 def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed: set | None = None,
-                 ctx: dict | None = None) -> tuple[int, str]:
+                 ctx: dict | None = None, deep=None) -> tuple[int, str]:
     """Walk-forward backtest of the forecast model: once a week over the stored history, a sample of
     the stocks that were liquid *on that day* (delisted ones included, so it isn't flattered by survivors), each
     forecast with only the data available then (beta, earnings dates, Fed and CPI days as the live model sees
-    them) and graded against what happened. Resumes across runs (time-boxed); live grades replace it."""
+    them) and graded against what happened. Resumes across runs (time-boxed); live grades replace it.
+    With the deep history (`deep`, Alpaca back to 2016) the weeks before the oldest one the Massive matrix gives come
+    from it, so the record reaches back about ten years."""
     import time
     from . import quant
     cfg = settings.c("forecast", default={}) or {}
@@ -539,75 +600,95 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
     bt = L.setdefault("bt", {})
     today = now_et().date()
     per_anchor = int(cfg.get("backtest_stocks", 150))
-    if bt.get("built") != today.isoformat()[:7] or bt.get("v") != 3:      # the grid is extended once a month
-        last = panel.T - 1
+    panels = {"m": panel}
+    if deep is not None and deep.T > 330 and BENCH in deep.col:
+        panels["d"] = deep
+    grid = sorted(panels)
+    if bt.get("built") != today.isoformat()[:7] or bt.get("v") != 4 or bt.get("panels") != grid:
         # one anchor a week (its last session), fixed to the calendar: the same dates every month, so stock-dates
         # already graded are skipped and the record grows by about four new weeks a month (years of months, which
-        # is what the signal learner's test needs)
+        # is what the signal learner's test needs). Queued by date: days added to a price history between runs
+        # shift the row positions.
+        last = panel.T - 1
         this_week = dt.date.fromordinal(int(panel.dates[last])).isocalendar()[:2]
-        wk: dict = {}
-        for i in range(260, last):
-            w = dt.date.fromordinal(int(panel.dates[i])).isocalendar()[:2]
-            if w != this_week:
-                wk[w] = i
-        anchors = sorted(wk.values(), reverse=True)[: int(cfg.get("backtest_anchors", 120))]
+        plan = [("m", i) for i in _weekly_rows(panel, 260, last, this_week)[: int(cfg.get("backtest_anchors", 120))]]
+        if "d" in panels:                    # older weeks: every one before the oldest the Massive matrix gives
+            first_m = min([int(panel.dates[i]) for _, i in plan] or [int(panel.dates[min(260, panel.T - 1)])])
+            d_rows = [i for i in _weekly_rows(deep, 260, deep.T - 1) if int(deep.dates[i]) < first_m]
+            plan += [("d", i) for i in d_rows[: int(cfg.get("backtest_deep_anchors", 600))]]
         seen = L.get("bt_seen") or {}
-        # queued by date: days added to the price history between runs shift the row positions
-        live_end = {}
-        for t, j in panel.col.items():
-            col = panel.close[:, j]
-            nz = np.flatnonzero(np.isfinite(col) & (col > 0))
-            live_end[t] = int(nz[-1]) if len(nz) else -1
+        ends = {k: _last_rows(P) for k, P in panels.items()}
         todo = []
-        for i in anchors:
-            day = dt.date.fromordinal(int(panel.dates[i])).isoformat()
-            fits = [h for _, h in forecast.HORIZONS[:4] if i + h < panel.T]
-            names = [t for t in quant.liquid_universe(panel, i, None)
+        for tag, i in plan:
+            P = panels[tag]
+            day = dt.date.fromordinal(int(P.dates[i])).isoformat()
+            # only horizons the record keeps that far back (older rows would be dropped as soon as they're made)
+            fits = [h for _, h in forecast.HORIZONS[:4] if i + h < P.T and day >= fledger.keep_since(h, today)]
+            if not fits:
+                continue
+            # the deep history's prices are split-adjusted back to 2016: a stock that has split 10-for-1 since then
+            # shows a tenth of what it traded at, so its floor is lower (the dollar-volume floor is unaffected)
+            names = [t for t in quant.liquid_universe(P, i, None, min_price=1.0 if tag == "d" else 5.0)
                      if _PLAIN.match(t) and t != BENCH
-                     and ((allowed is None or t in allowed) or live_end.get(t, -1) < last - 20)]
+                     and ((allowed is None or t in allowed) or ends[tag].get(t, -1) < P.T - 21)]
             names = sorted(names, key=lambda t: hashlib.sha1(f"{t}:{day}".encode()).hexdigest())[:per_anchor]
-            todo += [[t, int(panel.dates[i])] for t in names + [BENCH]
+            todo += [[t, int(P.dates[i]), tag] for t in names + [BENCH]
                      if not all(f"quant_bt:{t}:{h}:{day}" in seen for h in fits)]
-        bt.update(v=3, built=today.isoformat()[:7], anchors=[int(panel.dates[i]) for i in anchors], todo=todo,
-                  n_names=len(todo))
-        cut = (today - dt.timedelta(days=1600)).isoformat()
+        bt.update(v=4, panels=grid, built=today.isoformat()[:7], anchors=[int(panels[g].dates[i]) for g, i in plan],
+                  todo=todo, n_names=len(todo))
+        cut = fledger.keep_since(21, today)          # the longest the record keeps: older marks can't be needed
         L["bt_seen"] = {k: 1 for k in (L.get("bt_seen") or {}) if k.rsplit(":", 1)[-1] >= cut}
     macro = forecast.macro_events(cfg.get("macro_events"))
     paths = int(cfg.get("backtest_paths", 800))
-    spy = panel.c(BENCH)
+    spys = {k: P.c(BENCH) for k, P in panels.items()}
     ctx = ctx or {}
-    proxies: dict[str, list[str]] = {}
+    proxies: dict[tuple[str, str], list] = {}
     done = added = 0
-    filled = _fill_bt_features(L, panel, spy)
+    filled = _fill_bt_features(L, panels, spys)
+    from . import review
+    views = {k: review.panel_view(P) for k, P in panels.items()}
+    merr = review.market_errors(L, "quant_bt")
+    # misses are taken apart only with the stocks' context at hand (earnings dates, 8-Ks): without it (the context
+    # job failed this run), they wait for a later run rather than being stored half-done
+    diag = bool(ctx)
+    filled_why = _fill_bt_why(L, panels, views, merr, ctx) if diag else 0
     todo = bt.get("todo") or []
-    pos = {int(d): k for k, d in enumerate(panel.dates)}
+    pos = {k: {int(d): r for r, d in enumerate(P.dates)} for k, P in panels.items()}
     while todo and time.monotonic() - t0 < secs:
-        t, day_ord = todo.pop()
-        i = pos.get(int(day_ord))
-        c = panel.c(t)
+        item = todo.pop()
+        t, day_ord, tag = item[0], item[1], (item[2] if len(item) > 2 else "m")
+        P = panels.get(tag)
+        if P is None:
+            continue
+        i = pos[tag].get(int(day_ord))
+        c = P.c(t)
+        spy = spys[tag]
         if c is None or i is None:
             continue
         hist = c[: i + 1]
-        ok = np.isfinite(hist) & (hist > 0)
+        ok = _segment(hist)
         if ok.sum() < 260 or not ok[-1]:
             continue
-        dates = [int(d) for d in panel.dates[: i + 1][ok]]
-        anchor = dt.date.fromordinal(int(panel.dates[i]))
-        bfeat = _bt_features(hist, spy, i, ok, panel.v(t)) if t != BENCH else None
+        dates = [int(d) for d in P.dates[: i + 1][ok]]
+        anchor = dt.date.fromordinal(int(P.dates[i]))
+        bfeat = _bt_features(hist, spy, i, ok, P.v(t)) if t != BENCH else None
         known = (ctx.get(t) or {}).get("past_earnings")
         when = (ctx.get(t) or {}).get("earnings_when") or {}
         nxt = None
-        if known:                             # filing dates: the next one is usually announced weeks ahead
-            # (two weeks ahead: later ones may not have been announced yet; the model estimates those, as live)
+        # the filing record, where it reaches back before this date (the SEC record kept covers recent years: on an
+        # older date, no filings would look like no earnings at all); else volume-spike estimates
+        if known and min(known) <= (anchor - dt.timedelta(days=100)).isoformat():
+            # (the next one is usually announced weeks ahead: two weeks ahead, later ones may not have been
+            # announced yet; the model estimates those, as live)
             upcoming = [d for d in known if anchor.isoformat() < d <= (anchor + dt.timedelta(days=14)).isoformat()]
             if upcoming:
                 nxt = {"date": upcoming[0], "time": when.get(upcoming[0], "post")}
-        else:                                 # volume-spike estimates: the past only (no peeking at later spikes)
-            if t not in proxies:
-                proxies[t] = earnings_proxy(c, panel.v(t), panel.dates)
-            known = proxies[t]
-        past = [d for d in known if d <= anchor.isoformat()]
-        beta = _beta_at(c, spy, i) if spy is not None and t != BENCH else 1.0
+            past = [d for d in known if d <= anchor.isoformat()]
+        else:                                 # the past only: a later, bigger spike can't hide an earlier one
+            if (tag, t) not in proxies:
+                proxies[(tag, t)] = earnings_spikes(c, P.v(t), P.dates)
+            past = pick_spikes(proxies[(tag, t)], anchor.isoformat())
+        beta = _beta_at(np.where(ok, hist, np.nan), spy, i) if spy is not None and t != BENCH else 1.0
         try:
             fc = forecast.build(t, dates, hist[ok].tolist(), beta=beta, earnings_next=nxt, past_earnings=past,
                                 macro=macro, paths=paths, rf=float(cfg.get("risk_free", 0.04)),
@@ -619,9 +700,9 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
         if fc is None:
             continue
         made = fc["made"]
-        for name, h in forecast.HORIZONS[:4]:                 # 1-year outcomes don't fit in two years of history
+        for name, h in forecast.HORIZONS[:4]:                 # 1-year outcomes: too few, too late to matter here
             k = i + h
-            if k >= panel.T:
+            if k >= P.T or made < fledger.keep_since(h, today):
                 continue
             seg = c[i:k + 1]
             if not (np.isfinite(seg).all() and np.all(seg > 0)):
@@ -640,16 +721,83 @@ def job_backtest(settings, state: dict, panel, budget, heavy_dir: Path, allowed:
             path = np.log(seg / c[i])
             dd = float(1 - math.exp(-float(np.max(np.maximum.accumulate(path) - path))))
             hz = fc["horizons"][name]
-            added += fledger.add_backtest(L, t, made, h, hz["lq"], hz["lq_raw"], hz["p_up"],
+            ok_add = fledger.add_backtest(L, t, made, h, hz["lq"], hz["lq_raw"], hz["p_up"],
                                           forecast.naive_lq(fc["naive_sigma_d"], h), r, dd, today, float(c[i]),
-                                          float(c[k]), dt.date.fromordinal(int(panel.dates[k])),
+                                          float(c[k]), dt.date.fromordinal(int(P.dates[k])),
                                           feats=ml.row_features(bfeat, fc, name) if bfeat else None)
+            added += ok_add
+            if ok_add and t == BENCH:                        # (graded before its day's stocks: their market part)
+                gb = L["graded"]["quant_bt"][str(h)][-1]
+                if "err" in gb:
+                    merr[(made, h)] = float(gb["err"])
+            elif ok_add and diag:
+                g = L["graded"]["quant_bt"][str(h)][-1]
+                if not g.get("in80"):                         # a miss: take it apart while its prices are at hand
+                    x = (ctx or {}).get(t) or {}
+                    sp = None
+                    if review.known_earnings(x, made) is None:
+                        if (tag, t) not in proxies:
+                            proxies[(tag, t)] = earnings_spikes(c, P.v(t), P.dates)
+                        # (the spikes up to the window's end, as they'd have been picked then)
+                        sp = pick_spikes(proxies[(tag, t)], g.get("end") or made)
+                    g["why"] = review.diagnose_panel(g, h, P, views.get(tag), merr.get((made, h)), x, sp)
     bt["todo"] = todo
     fledger.save(heavy_dir, L)
     settings.mark_heavy_dirty()
     left = len(todo)
     return added, (f"{added} backtest forecasts graded this run" + (f"; {left} stock-dates to go" if left else "; complete")
-                   + (f"; signal features added to {filled} earlier ones" if filled else ""))
+                   + (f"; signal features added to {filled} earlier ones" if filled else "")
+                   + (f"; {filled_why} earlier misses taken apart" if filled_why else ""))
+
+
+def _fill_bt_why(L: dict, panels: dict, views: dict, merr: dict, ctx: dict, limit: int = 3000) -> int:
+    """Backtest misses graded before misses were taken apart get their diagnosis now, from whichever price history
+    has their dates (newest first; the rest on later runs)."""
+    from . import review
+    todo = []
+    for hk, rows in (L.get("graded", {}).get("quant_bt") or {}).items():
+        for r in rows:
+            if not r.get("in80") and "why" not in r and r.get("t") != BENCH:
+                todo.append((r["made"], int(hk), r))
+    todo.sort(key=lambda x: x[0], reverse=True)
+    n = 0
+    spikes: dict = {}
+    for made, h, r in todo[:limit]:
+        o = dt.date.fromisoformat(made).toordinal()
+        why = None
+        for tag in sorted(panels, key=lambda g: g != "m"):
+            P = panels[tag]
+            if P.c(r["t"]) is None or not len(P.dates) or o < int(P.dates[0]) or o > int(P.dates[-1]):
+                continue
+            x = ctx.get(r["t"]) or {}
+            sp = None
+            if review.known_earnings(x, made) is None:
+                if (tag, r["t"]) not in spikes:
+                    spikes[(tag, r["t"])] = earnings_spikes(P.c(r["t"]), P.v(r["t"]), P.dates)
+                sp = pick_spikes(spikes[(tag, r["t"])], review._window_end(r, h))
+            why = review.diagnose_panel(r, h, P, views.get(tag), merr.get((made, h)), x, sp)
+            if why.get("c") != "unknown":
+                break
+        if why is not None:
+            r["why"] = why
+            n += 1
+    return n
+
+
+MAX_GAP = 10          # sessions without a price after which a ticker's earlier history isn't used (see _segment)
+
+
+def _segment(hist: np.ndarray) -> np.ndarray:
+    """The valid closes of the unbroken run that ends at the last row. Across a long gap (weeks with no trades) a
+    ticker may have been another company's, or the prices are otherwise not comparable, so what came before isn't
+    used (joined up, the gap would look like one enormous daily move)."""
+    ok = np.isfinite(hist) & (hist > 0)
+    pos = np.flatnonzero(ok)
+    if len(pos) > 1:
+        gaps = np.flatnonzero(np.diff(pos) > MAX_GAP)
+        if len(gaps):
+            ok[: pos[gaps[-1] + 1]] = False
+    return ok
 
 
 def _bt_features(hist: np.ndarray, spy: np.ndarray | None, i: int, ok: np.ndarray, vol: np.ndarray | None = None
@@ -666,11 +814,10 @@ def _bt_features(hist: np.ndarray, spy: np.ndarray | None, i: int, ok: np.ndarra
     return f if "rev" in f else None
 
 
-def _fill_bt_features(L: dict, panel, spy: np.ndarray | None, limit: int = 6000) -> int:
-    """Backtest rows written before this version's features get them now (same prices and volumes, same anchor day).
-    Whether an earnings report fell inside the window isn't known for these, so it stays blank."""
-    if spy is None:
-        return 0
+def _fill_bt_features(L: dict, panels: dict, spys: dict, limit: int = 6000) -> int:
+    """Backtest rows written before this version's features get them now (same prices and volumes, same anchor day,
+    from whichever price history has that day: Massive's, else the deep one). Whether an earnings report fell
+    inside the window isn't known for these, so it stays blank."""
     n = 0
     for h in ("1", "5", "21", "63"):
         for r in (L.get("graded", {}).get("quant_bt", {}).get(h) or []):
@@ -678,14 +825,19 @@ def _fill_bt_features(L: dict, panel, spy: np.ndarray | None, limit: int = 6000)
                 return n
             if (r.get("f") or {}).get("v") == ml.FEAT_V or r.get("f_tried") == ml.FEAT_V:
                 continue
-            c = panel.c(r["t"])
-            i = panel.ix_on_or_before(dt.date.fromisoformat(r["made"]))
+            day = dt.date.fromisoformat(r["made"])
             f = None
-            if c is not None and i is not None and panel.dates[i] == dt.date.fromisoformat(r["made"]).toordinal():
+            for tag in sorted(panels, key=lambda g: g != "m"):
+                panel, spy = panels[tag], spys.get(tag)
+                c = panel.c(r["t"])
+                i = panel.ix_on_or_before(day)
+                if spy is None or c is None or i is None or panel.dates[i] != day.toordinal():
+                    continue
                 hist = c[: i + 1]
-                ok = np.isfinite(hist) & (hist > 0)
+                ok = _segment(hist)
                 if ok.any() and ok[-1]:
                     f = _bt_features(hist, spy, i, ok, panel.v(r["t"]))
+                break
             if f:
                 r["f"] = {k: round(float(v), 4) for k, v in f.items()}
                 r.pop("f_tried", None)
@@ -761,14 +913,51 @@ def _series_fn(panel, store):
     return get
 
 
+def _series3_fn(panel, store):
+    """(dates, closes, volumes) for a stock: the whole-market history first, else the per-stock store."""
+    def get(t: str):
+        if panel is not None:
+            c = panel.c(t)
+            if c is not None and np.isfinite(c).any():
+                return [int(d) for d in panel.dates], np.asarray(c, dtype=float), panel.v(t)
+        s = store.series(t) if store is not None else None
+        if s and s.get("dates"):
+            v = s.get("v")
+            return list(s["dates"]), np.asarray(s["c"], dtype=float), (np.asarray(v, dtype=float) if v else None)
+        return None
+    return get
+
+
+def job_results(settings, state: dict, panel, store, heavy_dir: Path, ctx: dict | None = None) -> tuple[int, str]:
+    """The Results page: every graded forecast against what happened, and why the misses missed (pipeline/review.py).
+    New misses are taken apart once and the diagnosis kept on the ledger row."""
+    from . import review
+    L = fledger.load(heavy_dir)
+    get = _series3_fn(panel, store)
+    n = 0
+    # backtest misses are taken apart by the backtest job, with the price history each was made from (the deep
+    # history's years aren't in the live one, and a miss marked "no prices" here would never be looked at again)
+    for src in ("quant", "claude", "blend") if ctx else ():   # (without the stocks' context, no earnings dates or
+        n += review.fill_why(L, src, get, ctx, limit=4000, spike_fn=earnings_spikes)   # 8-Ks: wait a run)
+    if n:
+        fledger.save(heavy_dir, L)
+        settings.mark_heavy_dirty()
+    doc = review.build(L, get, state.get("learn") or {}, ctx)
+    write_json(settings.out_dir / "results.json", doc)
+    q = (doc["sources"].get("quant") or doc["sources"].get("quant_bt") or {}).get("headline") or {}
+    return n, (f"{q.get('n', 0)} graded forecasts; {round(100 * q['win'])}% inside their 80% range" if q.get("n")
+               else "no graded forecasts yet") + (f"; {n} misses taken apart" if n else "")
+
+
 def job_grade_learn(settings, state: dict, panel, store, heavy_dir: Path, budget=None) -> tuple[int, str]:
     L = fledger.load(heavy_dir)
     get = _series_fn(panel, store)
     mlast = int(panel.dates[-1]) if panel is not None else ((store.series(BENCH) or {}).get("dates") or [None])[-1]
     n = fledger.grade(L, get, market_last=mlast)
     cfg = settings.c("forecast", default={}) or {}
-    calib = learn.calibration(L, min_n=int(cfg.get("calib_min_n", 200)), min_dates=int(cfg.get("calib_min_dates", 20)))
     lr = state.get("learn") or {}
+    calib = learn.calibration(L, min_n=int(cfg.get("calib_min_n", 200)), min_dates=int(cfg.get("calib_min_dates", 20)),
+                              prev=lr.get("calib"))
     rl = lr.get("range")
     try:                                              # the range learner: re-tested with every calibration
         rl = ml.range_learner(L, calib, prev=lr.get("range"))
@@ -776,20 +965,26 @@ def job_grade_learn(settings, state: dict, panel, store, heavy_dir: Path, budget
         log.warning("range learner: %s", err)
     tilt = lr.get("tilt")
     left = budget.left() - 120 if budget is not None else 600.0
+    keeper = lr.get("keeper")
+    try:                                              # the coverage keeper: replayed on the live record every run
+        keeper = ml.coverage_keeper(L, prev=keeper)
+    except Exception as err:  # noqa: BLE001 – keep the last decision if the replay itself fails
+        log.warning("coverage keeper: %s", err)
     tilt = learn.tilt_in_force(lr, now_utc())
-    due = (not tilt or not lr.get("tilt_at") or tilt.get("fv") != ml.FEAT_V
+    due = (not tilt or not lr.get("tilt_at") or tilt.get("fv") != ml.FEAT_V or tilt.get("hp") != [ml.HP_V, ml.CANDIDATES]
            or (now_utc() - dt.datetime.fromisoformat(lr["tilt_at"].replace("Z", "+00:00"))).days >= 7)
     if due and left > 60:
         try:
             res = ml.compete(L, seconds=min(300.0, left))   # the weekly algorithm competition (time-boxed)
             if not res.get("postponed"):
-                tilt = learn.tilt_gate(tilt if (tilt or {}).get("fv") == ml.FEAT_V else None, res)
+                same = (tilt or {}).get("fv") == ml.FEAT_V and (tilt or {}).get("hp") == [ml.HP_V, ml.CANDIDATES]
+                tilt = learn.tilt_gate(tilt if same else None, res)   # an older version's decision starts over
                 lr["tilt_at"] = iso(now_utc())      # on only after two weekly passes in a row
         except Exception as err:  # noqa: BLE001
             log.warning("signal learner: %s", err)
     m = fledger.metrics(L)
-    state["learn"] = {**lr, "calib": calib, "tilt": tilt, "range": rl, "blend": learn.blend_weights(L),
-                      "updated": iso(now_utc())}
+    state["learn"] = {**lr, "calib": calib, "tilt": tilt, "range": rl, "keeper": keeper,
+                      "blend": learn.blend_weights(L), "updated": iso(now_utc())}
     state["fc_metrics"] = m
     write_json(settings.cache_dir / FEEDBACK, claude_feedback(L, m, get))
     fledger.save(heavy_dir, L)
@@ -798,7 +993,8 @@ def job_grade_learn(settings, state: dict, panel, store, heavy_dir: Path, budget
     return n, (f"{n} forecasts graded; {m['pending']} waiting; calibration applied at "
                + (", ".join(applied) if applied else "no horizon yet (needs 200+ graded from 20+ days)")
                + f"; signal learner {'on (' + ml.NAMES.get((tilt or {}).get('model'), '?') + ')' if (tilt or {}).get('on') else 'off'}"
-               + f"; range learner on at {', '.join(k for k, v in (rl or {}).items() if v.get('status') == 'applied') or 'no horizon'}")
+               + f"; range learner on at {', '.join(k for k, v in (rl or {}).items() if v.get('status') == 'applied') or 'no horizon'}"
+               + f"; coverage keeper on at {', '.join(k for k, v in (keeper or {}).items() if v.get('status') == 'applied') or 'no horizon'}")
 
 
 def claude_feedback(L: dict, m: dict, get) -> dict:
@@ -1082,7 +1278,8 @@ def accuracy_doc(settings, state: dict, led_metrics: dict | None) -> dict:
     lr = state.get("learn") or {}
     return {
         "generated_at": iso(now_utc()), "metrics": state.get("fc_metrics"),
-        "learning": {"calibration": lr.get("calib"), "tilt": lr.get("tilt"), "range": lr.get("range"), "blend": lr.get("blend"),
+        "learning": {"calibration": lr.get("calib"), "tilt": lr.get("tilt"), "range": lr.get("range"),
+                     "keeper": lr.get("keeper"), "blend": lr.get("blend"),
                      "updated": lr.get("updated")},
         "lessons": [{**L, "lesson": A.sanitize_lesson(L.get("lesson"))} for L in reversed((ai.get("lessons") or [])[-20:])
                     if A.sanitize_lesson(L.get("lesson"))],

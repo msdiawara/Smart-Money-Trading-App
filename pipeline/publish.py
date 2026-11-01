@@ -62,6 +62,12 @@ SOURCES = [
      "official": False, "freshness": "every 6 hours"},
     {"key": "backtest", "name": "Forecast backtest", "origin": "The model re-run on past dates (whole-market history)",
      "official": False, "freshness": "rebuilt monthly, in batches"},
+    {"key": "results", "name": "Results (every forecast graded, misses explained)",
+     "origin": "The app's own forecast ledger + stored prices, earnings dates and 8-K filings", "official": False,
+     "freshness": "hourly"},
+    {"key": "deep_history", "name": "Deep price history (for the backtest)",
+     "origin": "Alpaca free plan: consolidated (SIP) daily bars since 2016; delisted stocks from Massive's reference list",
+     "official": False, "freshness": "built once over a day or so of runs (needs free Alpaca keys); never published"},
 ]
 
 

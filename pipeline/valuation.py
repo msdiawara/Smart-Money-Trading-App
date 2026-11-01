@@ -339,7 +339,22 @@ def extract_metrics(js: dict) -> dict:
     })
     if unclear:
         out["note"] = unclear
+    out["filed_max"] = _latest_filed(js)
     return out
+
+
+def _latest_filed(js: dict) -> str | None:
+    """The newest filing date of any fact in a companyfacts document: the latest statements its numbers can
+    include (the forecast's statement signals are used only when that came before the forecast's day)."""
+    best = ""
+    for tax in ((js or {}).get("facts") or {}).values():
+        for concept in (tax or {}).values():
+            for rows in ((concept or {}).get("units") or {}).values():
+                for r in rows or []:
+                    f = str((r or {}).get("filed") or "")[:10]
+                    if f > best:
+                        best = f
+    return best or None
 
 
 def ttm_like_latest(groups: dict) -> tuple[float, str] | None:

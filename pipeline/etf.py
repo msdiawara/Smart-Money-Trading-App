@@ -139,8 +139,13 @@ def _easter(y: int) -> dt.date:
     return dt.date(y, month, day)
 
 
+# One-off NYSE closures since 2016 that no rule predicts (national days of mourning).
+SPECIAL_CLOSURES = (dt.date(2018, 12, 5), dt.date(2025, 1, 9))
+
+
 def nyse_holidays(y: int) -> set[dt.date]:
-    """NYSE full-day closures by rule (observed dates), for days the stored market calendar doesn't cover yet."""
+    """NYSE full-day closures by rule (observed dates), for days the stored market calendar doesn't cover yet, and for
+    the deep-history backtest. Juneteenth is a market holiday from 2022 on."""
     def observed(d: dt.date) -> dt.date | None:
         if d.weekday() == 5:
             return d - dt.timedelta(days=1) if d.month != 1 else None    # Sat Jan 1: no Friday closure
@@ -154,8 +159,9 @@ def nyse_holidays(y: int) -> set[dt.date]:
     last_mon_may = dt.date(y, 5, 31)
     last_mon_may -= dt.timedelta(days=(last_mon_may.weekday() - 0) % 7)
     days = {observed(dt.date(y, 1, 1)), nth_weekday(1, 0, 3), nth_weekday(2, 0, 3), _easter(y) - dt.timedelta(days=2),
-            last_mon_may, observed(dt.date(y, 6, 19)), observed(dt.date(y, 7, 4)), nth_weekday(9, 0, 1),
-            nth_weekday(11, 3, 4), observed(dt.date(y, 12, 25))}
+            last_mon_may, observed(dt.date(y, 6, 19)) if y >= 2022 else None, observed(dt.date(y, 7, 4)),
+            nth_weekday(9, 0, 1), nth_weekday(11, 3, 4), observed(dt.date(y, 12, 25))}
+    days |= {d for d in SPECIAL_CLOSURES if d.year == y}
     return {d for d in days if d}
 
 

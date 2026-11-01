@@ -48,7 +48,9 @@ Tap any stock for its **research page**:
 Plus an **Ideas** tab (market backdrop, the AI bubble gauge, Top conviction stocks, three transparent screens with measured track
 records, and Claude's weekday morning brief with setups to watch, each with a trigger and an invalidation), and a **Records**
 tab that grades every probability and every price forecast the app has ever shown, Claude's included, so you can see whether
-it's getting better (see *How accurate is it?* below). Light and dark themes follow your phone, or pick one under *More*.
+it's getting better (see *How accurate is it?* below), and a **Results** tab: the forecasting tool's overall win rate, what
+it expected against what happened, and every miss taken apart, with why it missed and what the app is changing because of it
+(see *Results* below). Light and dark themes follow your phone, or pick one under *More*.
 Every refresh runs a **self-check** of the data and the app.
 
 It refreshes about every **5 minutes** (GitHub's minimum): new filings on EDGAR's live feed usually show up within
@@ -91,7 +93,7 @@ Repository **Settings → Pages → Build and deployment → Source: GitHub Acti
 | `MASSIVE_API_KEY` | **Recommended** | Free at massive.com (formerly Polygon.io) → Dashboard → API keys. Powers price history, risk meters and all win rates |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Recommended for alerts | Telegram: message **@BotFather** → `/newbot` → copy the token. Send your new bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `"chat":{"id": …}` |
 | `NTFY_TOPIC` (+ `NTFY_TOKEN`) | Alternative alerts | Install the **ntfy** app, subscribe to a long random topic name (it acts as a password). The free tier is per-IP and GitHub's runners share IPs, so a free ntfy account token (`NTFY_TOKEN`) is more reliable |
-| `ALPACA_KEY_ID` + `ALPACA_SECRET_KEY` | Optional | Free paper account at alpaca.markets → API keys. Adds an indicative real-time price (IEX) |
+| `ALPACA_KEY_ID` + `ALPACA_SECRET_KEY` | **Recommended** | Free paper account at alpaca.markets → API keys. Adds an indicative real-time price (IEX) and, once, every US stock's daily prices back to 2016 (with the Massive key too, delisted ones included), so the backtest and the learning reach back about ten years instead of two |
 | `OPENFIGI_API_KEY` | Optional | Free at openfigi.com. Maps fund holdings to tickers ~10× faster |
 | `ANTHROPIC_API_KEY` | Recommended | Turns on Claude's analysis, idea write-ups and the morning brief. Create a key at platform.claude.com. A claude.ai subscription doesn't include API usage, **but Max 5x/20x plans include $100/$200 a month of API credit**, claimed by linking a Console organization to your plan (Anthropic help article "Monthly API credits for Max and Team plans"). Web search must be allowed for your Console organization (it is by default). See *Claude analyst* below for costs |
 | `FRED_API_KEY` | Optional | Free at fred.stlouisfed.org (My Account → API keys). Adds rates, the yield curve and VIX to the market backdrop |
@@ -216,27 +218,71 @@ horizon and for the model, Claude, the combined forecast and the backtest, with 
   grades). Evidence is counted in independent months, and a correction is used only if it would have improved the newest
   forecasts it wasn't fitted on.
 * **Range learner (machine learning):** gradient-boosted trees test whether the right range width depends on the stock's
-  situation (volatility rising or falling, a recent big move, an earnings report in the window). They're used at a horizon
-  only if they beat the single width on recent forecasts they weren't fitted on.
-* **Signal learner (machine learning, a weekly competition):** four algorithms compete to predict which stocks will beat
-  their forecast relative to the others: ridge regression, gradient-boosted trees, a neural network and the average of the
-  three. They use the app's signals: momentum, recent moves, volatility, volume, smart-money trades, valuation, Claude's
-  stance, insider buying and bubble score. Each is tested month by month on forecasts it never saw, and the one with the
-  best record so far is used. A nudge is applied only if that record passes a strict significance test, twice. With weak
-  signals the honest answer is often "no nudge", and the app shows that test as it runs.
+  situation (volatility rising or falling, a recent big move, an earnings report in the window, and how often that stock's
+  own ranges have missed before). They're used at a horizon only if they beat the single width on recent forecasts they
+  weren't fitted on.
+* **Coverage keeper (adaptive conformal prediction):** after each day's results it widens the next ranges a little when
+  more than 20% missed their 80% range, and narrows them when fewer did, so coverage stays near 80% when markets change.
+  It's used only where replaying it on the live record beat leaving the ranges alone.
+* **Signal learner (machine learning, a weekly competition):** nine candidates compete to predict which stocks will beat
+  their forecast relative to the others: ridge regression, robust (Huber) regression, spline regression, gradient-boosted
+  trees, a random forest, CatBoost, a neural network, the average of all of them, and the **fused model** (below). Each
+  catches a different kind of pattern: straight lines, lines that ignore a few huge outliers, effects that bend,
+  thresholds and combinations. They use the app's signals: momentum, recent moves, volatility, volume, smart-money
+  trades, valuation, Claude's stance, insider buying and bubble score, and now **the news, filings and financial
+  statements** known at each forecast's close: how much the company was in the headlines that week and their tone,
+  material 8-K filings and red flags, revenue growth, operating margin, free-cash-flow yield and share issuance. Each
+  candidate is tested month by month on forecasts it never saw, and the one with the best record so far is used. A nudge
+  is applied only if that record passes a strict significance test, twice. With weak signals the honest answer is often
+  "no nudge", and the app shows that test as it runs.
+* **The fused model (the app's own algorithm):** it averages only the three algorithms that have been working best,
+  chosen month by month from what was known at the time, so it is always tested on months it didn't help choose. It
+  can be put in use only after nine test months as a real fusion, and only if it passes the same test as the others.
+* **Ten years to learn from:** with the free Alpaca keys set, the app fetches every US stock's daily prices back to 2016
+  once, so the backtest (and the tests above) cover about ten years of months instead of two. More months is what lets
+  the tests tell a real signal from luck. With the free Massive key as well, stocks that were delisted since 2016 are
+  included, so the backtest isn't flattered by looking only at the survivors.
 * **Model and Claude:** their mix follows their measured skill on the same forecasts.
 * **Claude's misses:** Claude reviews its worst misses, and the causes that at least two of those reviews agree on (from fixed
   lists, never free text) go into its next forecasts.
 
 The loop was checked on simulated markets against the same forecasts without learning:
 * With nothing to learn, the signal learner stayed off.
-* With a planted signal, the competition picked the right kind of model and improved 1-week to 3-month forecasts in every
-  quarter, by up to about 6%.
+* With a planted signal, the competition picked a fitting kind of model (robust regression for a straight-line effect,
+  the average or CatBoost for one that bends) and improved 1-week to 3-month forecasts in every quarter, by up to about 6%.
+* The fused model picked the right three algorithms for each market (straight-line ones for a straight-line effect,
+  ones that can bend for one that bends) and came second in both, ahead of almost every single algorithm.
 * When earnings jumps grew bigger than in the history, the range learner improved 1-week and 1-month forecasts by about 2%.
+* A weak signal looked harmful with two years of backtest and helpful with ten. It stayed off in both, because it
+  wasn't clear enough, but more years is what lets the test see such effects at all.
 Details, statistics and the simulation results are in [`docs/METHODS.md`](docs/METHODS.md) (sections 7–9).
 
 Accuracy needs time: the first 1-day grades arrive the next trading day, 1-month grades after a month, and live calibration
 switches on after about 200 graded forecasts from 20+ days. Until then the backtest (the model re-run on past prices) fills in.
+
+## Results: the win rate, and why it missed
+The **Results** tab is the forecasting tool's scorecard. A forecast *wins* when the price ends inside its 80% range, so
+about 80% should win by design: well above that means the ranges are wider than needed, well below means too narrow.
+* **The overall win rate** over every graded forecast (the same totals as the Records tab), for the model, Claude, the
+  combined forecast and the backtest (never mixed): per horizon, over the last 90 days, and month by month, with an
+  honest 95% interval that allows for overlapping forecasts.
+* **Expected against actual:** the direction calls are shown next to what the forecasts themselves expected (a "55% up"
+  forecast expects to be right 55% of the time), compared on the same calls, and next to "always say up".
+* **Where it does better or worse:** with or without an earnings report in the window, calm or volatile stocks, thinly
+  or heavily traded, the market rising or falling, nudged by the signal learner or not, and by industry.
+* **Every miss, taken apart** (the newest of each horizon listed): the range it gave in prices, where the price ended
+  and by how much, and why: the whole market moving, an earnings reaction, a one-day shock (with the 8-K filed that
+  day, if any), far more volatility than expected, or a steady trend. Each part is measured from the daily prices over
+  the forecast's window.
+* **What changes because of it:** next to every miss and every cause, what the learning loop is actually doing about
+  that kind of miss right now (wider ranges from the calibration or the coverage keeper, the range learner's test, the
+  signal learner's test and the fused model), taken from the learners' latest decisions rather than promised.
+
+The misses feed back into the forecasts through the learners: every miss counts in the calibration and the coverage
+keeper; each stock's own record of misses, and of misses this breakdown put down to earnings, are inputs to the range
+learner; and the news, filing and financial-statement signals are inputs the signal learner tests. Each change is used
+only once it has beaten "no change" on forecasts it wasn't fitted on. The tab loads when you open it, so it doesn't
+slow the rest of the app. Details: [`docs/METHODS.md`](docs/METHODS.md), section 9b.
 
 ## The self-check
 Every refresh, the app checks itself: how old the data is, every file loaded, the trades and prices well-formed, every module

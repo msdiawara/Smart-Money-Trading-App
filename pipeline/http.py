@@ -57,6 +57,8 @@ DEFAULT_RATES = {
     "api.openfigi.com": 25 / 60.0,      # 25 per minute without key (raised when a key is set)
     "public-api.etoro.com": 0.9,        # 60/min
     "data.alpaca.markets": 3.0,         # 200/min
+    "paper-api.alpaca.markets": 2.0,    # the asset list (deep history), once
+    "api.alpaca.markets": 2.0,
     "query1.finance.yahoo.com": 1.0,
     "query2.finance.yahoo.com": 1.0,
     "disclosures-clerk.house.gov": 2.0,

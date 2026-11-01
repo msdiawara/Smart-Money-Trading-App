@@ -8,6 +8,21 @@ pypdfium2==5.13.0
 pillow==12.3.0
 # predictability model (logistic regression + gradient boosting comparison)
 scikit-learn==1.9.1
+catboost==1.2.10          # one of the forecast learner's candidates (boosted trees built for small, noisy data)
+# what CatBoost itself installs, pinned too so a new release can't change a run (CatBoost imports them at start)
+pandas==3.0.5
+python-dateutil==2.9.0.post0
+matplotlib==3.11.2
+contourpy==1.4.0
+cycler==0.12.1
+fonttools==4.66.1
+kiwisolver==1.5.1
+packaging==26.3
+pyparsing==3.3.3
+plotly==7.1.0
+narwhals==2.27.1
+graphviz==0.21
+six==1.17.0
 scipy==1.18.1
 joblib==1.6.0
 threadpoolctl==3.7.0

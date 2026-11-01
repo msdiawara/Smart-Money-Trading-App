@@ -277,9 +277,30 @@ def run(force: set[str] | None = None, transport=None, settings: Settings | None
     do("context", ctx_job)
     if due("forecasts", R.get("forecasts", 30)) and budget.ok(60):
         do("forecasts", insight.job_forecasts, settings, state, store, budget, sctx, prio, settings.heavy_dir)
+    # ---- deep history (Alpaca's free plan, back to 2016): built once, a couple of minutes a run, for the backtest
+    deep = None
+    fcfg = settings.c("forecast", default={}) or {}
+    if pan is not None and s.alpaca_key_id and s.alpaca_secret and fcfg.get("deep_history", True):
+        from .deep import DeepHistory
+        deep = DeepHistory(settings.heavy_dir, start=str(fcfg.get("deep_start", "2016-01-01")))
+        if not deep.done and due("deep_history", R.get("deep_history", 60)) and budget.ok(240):
+            from .deep import listed_ciks as _listed
+            listed_ciks = _listed(tick)              # companies still trading on a main exchange (renamed, not gone)
+
+            def deep_job():
+                try:
+                    return deep.step(http, s.alpaca_key_id, s.alpaca_secret,
+                                     seconds=max(30.0, min(float(fcfg.get("deep_seconds_per_run", 150)),
+                                                           budget.left() - 330)),
+                                     massive_key=s.massive_key, listed_ciks=listed_ciks)
+                finally:
+                    settings.mark_heavy_dirty()           # progress is saved even when a step fails
+            do("deep_history", deep_job)
     bt_left = ((state.get("jobs") or {}).get("backtest") or {}).get("note") or ""
     if pan is not None and (due("backtest", R.get("backtest", 1440)) or "to go" in bt_left) and budget.ok(120):
-        do("backtest", insight.job_backtest, settings, state, pan, budget, settings.heavy_dir, allowed, sctx)
+        # the deep matrix (one to two hundred MB) is read from disk only when the backtest runs
+        deep_pan = quant.Panel(deep) if deep is not None and deep.done else None
+        do("backtest", insight.job_backtest, settings, state, pan, budget, settings.heavy_dir, allowed, sctx, deep_pan)
 
     # ---- score everything (cheap; context changes as new trades arrive)
     months = read_json(settings.cache_dir / "insider_months.json.gz") or {}
@@ -338,6 +359,8 @@ def run(force: set[str] | None = None, transport=None, settings: Settings | None
                                     "Claude's price forecasts written to the forecast ledger"))
     if due("forecast_grading", R.get("forecast_grading", 360)):
         do("forecast_grading", insight.job_grade_learn, settings, state, pan, store, settings.heavy_dir, budget)
+    if (due("results", R.get("results", 60)) or not (settings.out_dir / "results.json").exists()) and budget.ok(30):
+        do("results", insight.job_results, settings, state, pan, store, settings.heavy_dir, sctx)
     do("conviction", lambda: (lambda n: (n, f"{n} Top conviction"))(insight.apply_conviction(settings, state, sctx, led)))
     if due("ledger", R.get("ledger", 360)):
         do("ledger", lambda: (ledger.grade(led, panel, store), f"{len(led['entries'])} forecasts on record"))

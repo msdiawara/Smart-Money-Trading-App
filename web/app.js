@@ -9,7 +9,7 @@
     set(k, v) { try { localStorage.setItem("smr." + k, JSON.stringify(v)); return true; } catch { return false; } },   // false: private mode or full
   };
   const S = { meta: null, feed: [], byId: {}, quotes: {}, leaders: null, health: null, market: null, ideas: null, accuracy: null,
-    fcAccuracy: null, audit: null, device: null, loadedAt: 0, version: null, shown: 60 };
+    fcAccuracy: null, results: null, audit: null, device: null, loadedAt: 0, version: null, shown: 60 };
   const ENTRY_DEPTH = history.length;      // history entries that belong to whatever came before this app
   const STALE_MIN = 120;                   // data older than this (minutes) is stale everywhere: header dot and self-check
 
@@ -893,6 +893,44 @@
     if (window.SMRChat) window.SMRChat.render(view, id || null);
     else view.innerHTML = `<div class="empty">The chat module didn't load. Reload the app.</div>`;
   }
+  // The Results data is the biggest file, so it's loaded when the tab is opened (once per data update), not with
+  // everything else.
+  let resultsLoading = null;
+  function loadResults() {
+    const want = S.version || "now";
+    if (!resultsLoading) {
+      fromCache.delete("results.json");
+      resultsLoading = getJSON("results.json", S.version || Date.now())
+        .then((d) => { S.results = d; S.resultsFor = want; S.resultsErr = null; S.resultsSaved = fromCache.has("results.json"); })
+        .catch((e) => { S.resultsErr = /HTTP 404/.test(e.message) ? "missing" : e.message || String(e); S.resultsFor = want; })
+        .finally(() => { resultsLoading = null; });
+    }
+    return resultsLoading;
+  }
+  function renderResults() {
+    if (!window.SMRResults) { view.innerHTML = `<div class="empty">The Results module didn't load. Reload the app.</div>`; return; }
+    const want = S.version || "now";
+    if (S.results) {
+      window.SMRResults.render(view);
+      if (S.resultsSaved) {         // the offline helper answered with its saved copy (a slow or no connection)
+        const n = document.createElement("p");
+        n.className = "notice";
+        n.innerHTML = `Showing the saved copy of the results: the latest didn't arrive in time. <button class="btn" id="res-retry">Load the latest</button>`;
+        const t = view.querySelector(".page-sub");
+        if (t) t.after(n); else view.prepend(n);
+        n.querySelector("button").onclick = () => { S.resultsFor = null; S.resultsSaved = false; renderResults(); };
+      }
+    } else if (S.resultsErr && S.resultsFor === want) {
+      view.innerHTML = `<h1 class="page-title">Results</h1><div class="empty">${S.resultsErr === "missing"
+        ? "The results haven't been published yet: the next refresh makes them."
+        : `The results couldn't be loaded (${esc(S.resultsErr)}). Check the connection and try again.`}
+        <p><button class="btn" id="res-retry">Try again</button></p></div>`;
+      const b = $("#res-retry");
+      if (b) b.onclick = () => { S.resultsFor = null; renderResults(); };
+      return;
+    } else view.innerHTML = `<h1 class="page-title">Results</h1><div class="empty">Loading the results…</div>`;
+    if (S.resultsFor !== want) loadResults().then(() => { if (viewName() === "results") renderResults(); });
+  }
   function safeDecode(x) { try { return decodeURIComponent(x); } catch { return x; } }
   function viewName() { return ((location.hash || "#/feed").match(/^#\/([^/]+)/) || [, "feed"])[1]; }
   function route(keepScroll) {
@@ -909,7 +947,7 @@
     S.renderedVersion = S.version;
     ({ feed: renderFeed, event: () => renderEvent(id), ticker: () => renderTicker(id), person: () => renderPerson(id), leaders: renderLeaders, ideas: renderIdeas,
       forecasts: () => (window.SMRStock && window.SMRStock.renderList ? window.SMRStock.renderList(view) : renderIdeas()),
-      watch: renderWatch, size: renderSize, status: renderStatus, ask: renderAsk, more: renderMore }[name] || renderFeed)();
+      watch: renderWatch, size: renderSize, status: renderStatus, ask: renderAsk, more: renderMore, results: renderResults }[name] || renderFeed)();
     if (name !== "feed" && !keepScroll) window.scrollTo(0, 0);
   }
   // after a redraw, keyboard focus goes back to the control that was pressed (the old one was replaced)
@@ -982,7 +1020,7 @@
   // auto-refresh: check for a new version every 60 s while visible, and when the app comes back to the foreground
   async function poll() {
     if (document.visibilityState !== "visible" || !(await loadAll(true))) return;
-    if (["ticker", "leaders", "forecasts"].includes(viewName())) toast("New data: tap “Updated” to refresh this page");   // don't redraw mid-read
+    if (["ticker", "leaders", "forecasts", "results"].includes(viewName())) toast("New data: tap “Updated” to refresh this page");   // don't redraw mid-read
     else refreshView();
   }
   setInterval(poll, 60000);

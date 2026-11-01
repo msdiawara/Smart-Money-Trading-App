@@ -69,7 +69,7 @@ def _pinball3(er: np.ndarray, w10: np.ndarray, w90: np.ndarray, scale: float, sh
 
 def calibration(L: dict, src: str = "quant", min_n: int = 200, min_dates: int = 20, b0: float = 6.0,
                 window_days: int = 460, lo: float = 0.6, hi: float = 2.0, fallback: str | None = "quant_bt",
-                b_shift: float = 60.0) -> dict:
+                b_shift: float = 60.0, prev: dict | None = None, switch_edge: float = 0.002) -> dict:
     """Per horizon. Learns from live graded forecasts (the last `window_days`, about the 15 months kept); until there
     are enough, from the walk-forward backtest (the same model run on past dates with only the data available
     then), and says which it used. It corrects lasting misfit (tails fatter than the model allows, say), not this
@@ -77,7 +77,10 @@ def calibration(L: dict, src: str = "quant", min_n: int = 200, min_dates: int = 
     horizon if longer): the stretch is shrunk by periods/(periods + b0), the median nudge, for which a past market
     move is weak evidence, by periods/(periods + b_shift). A hold-out check fits on older forecasts only (whose
     outcomes were known before the newest ones were made) and scores the newest 30% of days: the correction is
-    applied only if it scored at least as well there as no correction."""
+    applied only if it scored at least as well there as no correction. So the ranges don't flip from one day to the
+    next as the hold-out days roll forward, a correction held back the day before (`prev`) must score at least
+    `switch_edge` (0.2%) better to be applied again; one applied the day before stays applied while it does no
+    worse than no correction."""
     def enough(rr: list[dict], h: int) -> bool:
         days = {r["made"] for r in rr}
         return len(rr) >= min_n and len(days) >= min_dates and ml.periods(days, h) >= 3
@@ -127,7 +130,10 @@ def calibration(L: dict, src: str = "quant", min_n: int = 200, min_dates: int = 
                        cov80_holdout_raw=float(np.mean([r.get("in80r", 0) for r in new])),
                        cov80_holdout=float(np.mean(need <= sc)),
                        holdout_gain=round(1 - loss1 / loss0, 5) if loss0 > 0 else None)
-            if loss0 > 0 and loss1 > loss0:          # it would have made the newest forecasts worse: don't apply it
+            was = ((prev or {}).get(name) or {}).get("status")
+            gain = 1 - loss1 / loss0 if loss0 > 0 else 0.0
+            # it would have made the newest forecasts worse (or, held back yesterday, isn't clearly better yet)
+            if loss0 > 0 and (loss1 > loss0 or (was == "held" and gain < switch_edge)):
                 res.update(status="held", scale=1.0, shift=0.0, fitted={"scale": round(scale, 4), "shift": round(shift, 5)})
         out[name] = res
     return out
@@ -136,8 +142,8 @@ def calibration(L: dict, src: str = "quant", min_n: int = 200, min_dates: int = 
 def tilt_gate(prev: dict | None, new: dict) -> dict:
     """Hysteresis for the weekly re-test: on only after two passes in a row, the second with a newly completed test
     month in it (re-running the same months the next week is not new evidence); once on, it stays on while the
-    test keeps t ≥ 1.5 with the last six test months positive on average, and switches off otherwise. While on,
-    the algorithm in use is that week's winner (or, on a weaker but still positive week, the one already in use)."""
+    test keeps t ≥ 1.5 with the last six test months positive on average, and the algorithm it would put in use keeps
+    t ≥ 1.5 on its own record; it switches off otherwise. While on, the algorithm in use is that week's best."""
     prev = prev or {}
     if new.get("accepted"):
         fresh = not prev.get("passes") or new.get("last_month") != prev.get("last_month")
@@ -145,9 +151,12 @@ def tilt_gate(prev: dict | None, new: dict) -> dict:
     else:
         passes = 0
     if prev.get("on"):
-        if (new.get("t") or 0) >= 1.5 and (new.get("recent_gain") or 0) > 0:
+        hold = new.get("accepted") or ((new.get("best_t") or 0) >= 1.5 and new.get("best") not in (None, "none"))
+        if (new.get("t") or 0) >= 1.5 and (new.get("recent_gain") or 0) > 0 and hold:
             if not new.get("accepted"):
-                new = {**new, "model": prev.get("model"), "cap": prev.get("cap"), "fv": prev.get("fv"), "accepted": True,
+                # a weaker but still positive week: the algorithm in use is this week's best (with this week's
+                # trio, if it's the fused model), so what runs is always what the latest test measured
+                new = {**new, "model": new["best"], "accepted": True,
                        "status": "applied: still holding up on later forecasts (re-tested weekly)"}
             return {**new, "passes": passes, "on": True}
         return {**new, "accepted": False, "model": "none", "passes": passes, "on": False,
@@ -160,10 +169,15 @@ def tilt_gate(prev: dict | None, new: dict) -> dict:
 
 def tilt_in_force(lr: dict, now: dt.datetime, max_days: int = 21) -> dict | None:
     """The signal learner's last decision, except that one switched on is paused when its weekly re-test is two
-    weeks overdue (a nudge nobody has re-checked for three weeks isn't applied). It needs two passes again after."""
+    weeks overdue (a nudge nobody has re-checked for three weeks isn't applied), and switched off when it was made
+    by an older version of the test (other candidates or settings). It needs two passes again after either."""
     tilt = lr.get("tilt")
     if not tilt or not tilt.get("on"):
         return tilt
+    if not ml.current(tilt):
+        return {**tilt, "on": False, "accepted": False, "model": "none", "passes": 0,
+                "status": "switched off: the test has changed since it passed (it's applied again once it passes the "
+                          "new one)"}
     try:
         at = dt.datetime.fromisoformat(str(lr.get("tilt_at")).replace("Z", "+00:00"))
         age = (now - at).days
@@ -198,6 +212,9 @@ def blend_weights(L: dict, b0: float = 10.0) -> dict:
 
 
 def features(e_scores: list[dict], quote: dict | None, val: dict | None, bub: dict | None, claude_stance: str | None,
-             closes: list[float] | None, bench: list[float] | None = None, volumes: list[float] | None = None) -> dict:
-    """Signal features recorded with each forecast (for learning which ones matter): see ml.py."""
-    return {**ml.price_features(closes, bench, volumes), **ml.signal_features(e_scores, val, bub, claude_stance)}
+             closes: list[float] | None, bench: list[float] | None = None, volumes: list[float] | None = None,
+             context: dict | None = None) -> dict:
+    """Signal features recorded with each forecast (for learning which ones matter): see ml.py. `context`: the news,
+    filing and financial-statement signals known at the anchor close (ml.context_features)."""
+    return {**ml.price_features(closes, bench, volumes), **ml.signal_features(e_scores, val, bub, claude_stance),
+            **(context or {})}

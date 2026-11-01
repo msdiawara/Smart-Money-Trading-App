@@ -123,7 +123,19 @@
       <p class="small muted">Targets: 50%, 80%, 90%. All figures are since the start; under the 80% figure, the last 120 days with its 95% interval (wide, because forecasts made the same week share the market's moves).</p></div></section>` : "";
   }
 
-  const ALGO = { ridge: "Ridge regression", trees: "Gradient-boosted trees", neural_net: "Neural network", average: "Average of the three" };
+  const ALGO = { fusion: "Fused model (best three)", ridge: "Ridge regression", huber: "Robust regression (Huber)", spline: "Spline regression", trees: "Gradient-boosted trees",
+    random_forest: "Random forest", catboost: "CatBoost", neural_net: "Neural network", average: "Average of all" };
+  function keeperRows(kp) {
+    const U = window.SMR.u;
+    if (!kp || !Object.keys(kp).length) return "";
+    const rows = HZ.filter(([k]) => kp[k]).map(([k, l]) => { const x = kp[k];
+      const what = x.status === "applied" ? `On: ranges ×${U.num(x.m, 2)}. In the last year of the replay, 80% held ${pc(x.cov80_without)} → ${pc(x.cov80_with)}, score ${signed(x.replay_gain, 1)}`
+        : x.status === "held" ? `Off: it wouldn't have helped (score ${signed(x.replay_gain || 0, 1)}; 80% held ${pc(x.cov80_without)} → ${pc(x.cov80_with)})`
+        : `<span class="muted">Learning: ${U.num(x.days || 0)}/${U.num((x.need || {}).days || 40)} days of live results</span>`;
+      return `<tr><td>${l}</td><td>${what}</td></tr>`; }).join("");
+    return `<h3>Coverage keeper (adaptive conformal)</h3><div class="scroll-x"><table class="cmp left2"><tr><th>Horizon</th><th>Range width</th></tr>${rows}</table></div>
+      <p class="small muted">After each day's results it widens the next ranges a little when more than 20% missed their 80% range, and narrows them when fewer did, so coverage stays near 80% when markets change. It's replayed on the live record using only results known at the time, and used only where the last year of that replay beat leaving the ranges alone.</p>`;
+  }
   function rangeRows(rl) {
     const U = window.SMR.u;
     if (!rl || !Object.keys(rl).length) return "";
@@ -145,10 +157,12 @@
       <h3>Range calibration</h3><div class="scroll-x"><table class="cmp left2"><tr><th>Horizon</th><th>Adjustment</th><th>80% held: before → after</th></tr>${rows}</table></div>
       <p class="small muted">Learned only from graded forecasts. Forecasts made in the same month share most of their outcome, so evidence is counted in independent months: the correction grows as more months agree, is capped, and is used only if it would have improved the newest forecasts it wasn't fitted on. "Before → after" is that test.</p>
       ${rangeRows(L.range)}
+      ${keeperRows(L.keeper)}
       <h3>Signal learner (machine learning)</h3><p class="small">${U.esc(t.status || "Waiting for graded forecasts.")}${t.test_gain != null ? ` Walk-forward record: ${signed(t.test_gain, 2)} average monthly error reduction over ${U.num(t.test_months)} test months (t = ${U.num(t.t, 1)}; ${U.num(t.t_needed ?? 2.5, 1)} needed, stricter while test months are few).` : ""}</p>
       ${t.candidates && Object.keys(t.candidates).length ? `<div class="scroll-x"><table class="cmp left2"><tr><th>Algorithm</th><th>Monthly gain on unseen months</th><th>t</th></tr>
         ${Object.entries(t.candidates).map(([k, v]) => `<tr><td>${U.esc(ALGO[k] || k)}${t.on && t.model === k ? ` <span class="tag">in use</span>` : !t.on && t.best === k ? ` <span class="small muted">(best)</span>` : ""}</td><td>${signed(v.gain, 2)}</td><td>${U.num(v.t, 1)}</td></tr>`).join("")}</table></div>
-        <p class="small muted">Each algorithm is refit month by month on earlier months only and scored on the next, on how each stock did against the others that day. The one used each month is the one with the better record before it, so even the choice of algorithm is tested on data it hadn't seen.</p>` : ""}
+        <p class="small muted">Each algorithm is refit month by month on earlier months only and scored on the next, on how each stock did against the others that day. The one used each month is the one with the better record before it, so even the choice of algorithm is tested on data it hadn't seen.</p>
+        ${t.fusion && t.fusion.length ? `<p class="small muted">The fused model averages the three algorithms with the best record on the months before each one (now ${U.esc(t.fusion.map((k) => ALGO[k] || k).join(", "))}). It can be put in use after 9 months as a fused model${t.fusion_months != null ? ` (${U.num(t.fusion_months)} so far)` : ""}.</p>` : ""}` : ""}
       ${t.n ? `<p class="small muted">Learning from ${U.num(t.n)} graded 1-month forecasts (${U.num(t.n_live || 0)} live, the rest from the backtest) over ${U.num(t.months)} months.</p>` : ""}
       ${t.on && t.weights ? `<p class="small muted">Weights: ${Object.entries(t.weights).filter(([, w]) => Math.abs(w) > 1e-5).map(([k, w]) => `${U.esc(k)} ${w > 0 ? "+" : ""}${(w * 10000).toFixed(0)}`).join(", ")} (basis points of 1-month return per standard deviation of the signal).</p>` : ""}
       <h3>Model + Claude blend</h3><p class="small">${HZ.every(([k]) => ((b[k] || {}).w_claude ?? 0.5) === 0.5) ? "Equal weights at every horizon until both have graded forecasts." : HZ.map(([k, l]) => `${l}: Claude ${Math.round(((b[k] || {}).w_claude ?? 0.5) * 100)}%`).join("; ") + "."}</p>

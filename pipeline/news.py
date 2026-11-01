@@ -100,7 +100,10 @@ def gdelt_query(name: str | None, ticker: str | None) -> str | None:
     return f"{core} sourcelang:english"
 
 
-def gdelt_url(query: str, days: int = 7, max_records: int = 40) -> str:
+GDELT_MAX = 250                      # the most one answer can hold (the page shows the best 8)
+
+
+def gdelt_url(query: str, days: int = 7, max_records: int = GDELT_MAX) -> str:
     return (f"{GDELT}?query={quote(query)}&mode=ArtList&format=json&maxrecords={max_records}"
             f"&timespan={days}d&sort=DateDesc")
 
@@ -148,6 +151,50 @@ def parse_gdelt(text: str, limit: int = 8) -> tuple[list[dict], str | None]:
     pick = good[:limit] if len(good) >= 3 else (good + [r for r in rows if not r["good"]])[:limit]
     pick.sort(key=lambda r: -_ts(r["seen"]))
     return pick, None
+
+
+# A small word list for the tone of a financial headline (the app's own, built for this; no licensed dictionary). It is
+# crude on purpose: the learners decide whether it predicts anything, and it counts only when a test says so.
+_POS = set("""beat beats tops topped surge surges surged soar soars soared jump jumps jumped rally rallies rallied
+record upgrade upgrades upgraded raise raises raised boost boosts boosted strong stronger gain gains climb climbs
+rise rises rising win wins won approval approved approves profit profitable outperform outperforms bullish buyback
+expands expansion breakthrough rebound rebounds rebounded accelerates exceeds exceeded""".split())
+_NEG = set("""miss misses missed plunge plunges plunged fall falls fell drop drops dropped slump slumps sink sinks tumble
+tumbles tumbled cut cuts downgrade downgrades downgraded lawsuit sued sues probe investigation recall recalls loss
+losses weak weaker warn warns warning bankruptcy layoffs fraud decline declines declined bearish delay delays halt
+halts fined subpoena crash crashes selloff slashes lowers underperform default downturn plummets plummeted""".split())
+_WORD = re.compile(r"[a-z]+")
+
+
+def headline_tone(title: str | None) -> float:
+    """-1 (all negative words) to 1 (all positive), 0 when the headline has none."""
+    w = _WORD.findall((title or "").lower().replace("sell-off", "selloff"))
+    p, n = sum(x in _POS for x in w), sum(x in _NEG for x in w)
+    return round((p - n) / (p + n), 3) if p + n else 0.0
+
+
+def gdelt_signal(text: str, max_records: int = GDELT_MAX) -> list | None:
+    """[distinct headlines, their average tone, whether GDELT's answer was full] for one news check: what the
+    forecast's news signals are taken from (the page shows only the best 8). An answer holds the newest
+    `max_records` articles of the week, so a full one means "at least this many"."""
+    if not (text or "").strip():
+        return None                                  # nothing came back: not the same as "no headlines"
+    try:
+        js = json.loads(text.strip())
+    except ValueError:
+        return None
+    if not isinstance(js, dict):
+        return None
+    arts = js.get("articles") or []
+    tones, seen = [], set()
+    for a in arts:
+        title = html.unescape((a or {}).get("title") or "").strip()
+        key = _norm_title(title)
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        tones.append(headline_tone(title))
+    return [len(tones), round(float(sum(tones) / len(tones)), 3) if tones else 0.0, int(len(arts) >= max_records)]
 
 
 def _ts(s: str | None) -> float:
@@ -215,6 +262,10 @@ def refresh_headlines(http: HttpClient, cache_dir: Path, tickers: list[str], nam
                 note = "GDELT asked the app to slow down; continuing next run"
                 break
             rec.update(fetched=iso(now), q=q, items=items, error=err, source="GDELT")
+            sig = gdelt_signal(text) if not err else None
+            if sig is not None:                        # the last few checks: a forecast uses the latest before its close
+                rec["sigs"] = [x for x in (rec.get("sigs") or []) if isinstance(x, list) and len(x) == 4][-5:] + \
+                    [[iso(now)] + sig]
             rec.pop("fails", None)
             rec.pop("retry_after", None)
             done += 1

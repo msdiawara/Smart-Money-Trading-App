@@ -50,6 +50,12 @@ forecast:
   risk_free: 0.04             # used when FRED isn't connected (otherwise the fed funds rate)
   backtest: true              # re-run the model on past dates so accuracy (and calibration) start on day one
   backtest_stocks: 150
+  # Deep history: with the free Alpaca keys set, every US stock's daily prices back to 2016 are fetched once
+  # (a couple of minutes per refresh until done) so the backtest, and the learning, reach back about ten years
+  # instead of the two the free Massive plan keeps. With the Massive key too, stocks delisted since then are
+  # included (from Massive's reference list). Used only for the backtest, never published.
+  deep_history: true
+  deep_start: "2016-01-01"
   # macro_events: [{date: "2027-01-08", kind: cpi}]   # extra Fed (fomc) / CPI dates beyond the built-in calendar
 
 valuation:
@@ -176,4 +182,6 @@ refresh:
   forecasts: 30               # rebuilt only after a new daily close
   forecast_grading: 360
   backtest: 1440
+  deep_history: 60            # while the deep price history is being built (a couple of minutes a run)
+  results: 60                 # the Results tab: graded forecasts and why the misses missed
   run_budget_minutes: 9       # stop starting new jobs after this long (keeps runs from piling up)

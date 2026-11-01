@@ -234,7 +234,8 @@
         <p class="small">${live ? `Graded so far at this horizon: ${U.num(live.n)} forecasts. The 80% range held <b>${pct0(live.cov80)}</b> of outcomes (target 80%); direction was right ${pct0(live.hit)} of the time versus ${pct0(live.up)} for "always say up".`
           : bt ? `Not graded live yet at this horizon. In the backtest (the same model re-run on past dates, ${U.num(bt.n)} forecasts at this horizon), its 80% ranges held <b>${pct0(bt.cov80)}</b> of outcomes (target 80%); direction was right ${pct0(bt.hit)} of the time versus ${pct0(bt.up)} for "always say up".`
           : "Not graded yet at this horizon: forecasts are written down daily and graded when their date arrives (see Records)."}
-          ${fc.calib && fc.calib[state.range] && fc.calib[state.range].scale !== 1 ? ` Ranges here are ${fc.calib[state.range].scale > 1 ? "widened" : "narrowed"} ×${U.num(fc.calib[state.range].scale, 2)} by what grading has taught it.` : ""}</p>
+          ${(() => { const c = fc.calib && fc.calib[state.range]; const k = c ? (c.scale || 1) * (c.keep || 1) : 1;   // calibration × the coverage keeper
+            return Math.abs(k - 1) >= 0.005 ? ` Ranges here are ${k > 1 ? "widened" : "narrowed"} ×${U.num(k, 2)} by what grading has taught it.` : ""; })()}</p>
         <details class="more"><summary>Method, assumptions and the table view</summary>
           <div class="scroll-x"><table class="cmp"><tr><th>Horizon</th><th>5%</th><th>10%</th><th>50%</th><th>90%</th><th>95%</th><th>Higher</th></tr>
             ${HZ.filter(([k]) => fc.horizons[k]).map(([k, l]) => { const z = fc.horizons[k]; return `<tr><td>${l}</td><td>${U.pxc(z.q["05"])}</td><td>${U.pxc(z.q["10"])}</td><td>${U.pxc(z.q["50"])}</td><td>${U.pxc(z.q["90"])}</td><td>${U.pxc(z.q["95"])}</td><td>${pct0(z.p_up)}</td></tr>`; }).join("")}</table></div>

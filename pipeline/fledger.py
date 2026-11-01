@@ -39,12 +39,12 @@ PATH = "forecast_ledger.json.gz"
 HMAP = dict(HORIZONS)
 SRCS = ("quant", "claude", "blend", "quant_bt")      # quant_bt: walk-forward backtest of the model on past data
 KEEP_GRADED = 40000                 # hard cap per source and horizon (whole months are dropped when it binds)
-KEEP_GRADED_BY_H = {"21": 60000}    # the 1-month records: four years of 50 a day fit
+KEEP_GRADED_BY_H = {"21": 150000}   # the 1-month records: years of 50 a day, and ten years of weekly backtest
 PER_DAY = {"quant": 50, "quant_bt": 150}  # sampled records kept per forecast day (others: all; the S&P 500's always)
 KEEP_DAYS = 460
-# the 1-month records the signal learner tests on: about four years of months (the test's power grows with them);
-# the 3-month ones: two years
-KEEP_DAYS_BY_H = {"21": 1500, "63": 760}
+# the 1-month records the signal learner tests on: back to 2016 when the deep history is there (the test's power
+# grows with the months it has); the 3-month ones: two years
+KEEP_DAYS_BY_H = {"21": 4000, "63": 760}
 
 
 def load(heavy_dir: Path) -> dict:
@@ -65,16 +65,21 @@ def _hash(t: str, made: str) -> int:
     return int(hashlib.sha1(f"{t}:{made}".encode()).hexdigest()[:8], 16)
 
 
+def keep_since(h, today: dt.date) -> str:
+    """The oldest forecast date compact() keeps for horizon h (whole months)."""
+    return (today - dt.timedelta(days=KEEP_DAYS_BY_H.get(str(h), KEEP_DAYS))).replace(day=1).isoformat()
+
+
 def compact(L: dict, today: dt.date | None = None) -> None:
-    """Keep the graded records the learning needs: ~15 months (about four years for the 1-month records the signal
-    learner uses, two for the 3-month ones), a fixed random sample per day (the same stocks at every horizon, plus
-    the S&P 500), and a hard cap. The monthly aggregates are not touched: they count everything."""
+    """Keep the graded records the learning needs: ~15 months (about eleven years for the 1-month records the
+    signal learner uses, two for the 3-month ones), a fixed random sample per day (the same stocks at every horizon,
+    plus the S&P 500), and a hard cap. The monthly aggregates are not touched: they count everything."""
     today = today or now_et().date()
     for src, by_h in (L.get("graded") or {}).items():
         k = PER_DAY.get(src)
         for h, rows in list(by_h.items()):
             # whole months at a time, so the learners' stored month-by-month test results stay valid within a month
-            cut = (today - dt.timedelta(days=KEEP_DAYS_BY_H.get(str(h), KEEP_DAYS))).replace(day=1).isoformat()
+            cut = keep_since(h, today)
             rows = [r for r in rows if (r.get("made") or "") >= cut]
             if k:
                 by_day: dict[str, list] = {}
@@ -324,6 +329,8 @@ def _finish(L: dict, fid: str, e: dict, r: float, dd: float, delisted: bool, tod
             g["ld"] = e["ld"]
         if e.get("split_f"):
             g["split_f"] = e["split_f"]
+    elif p0 and math.isfinite(p0):                 # the Results page shows the range in prices, and the window's end
+        g.update(p0=round(p0, 4), end=end.isoformat())
     p = pit(lq, r)
     g.update(pit=round(p, 4), in50=int(lq[2] <= r <= lq[4]), in80=int(lq[1] <= r <= lq[5]),
              in90=int(lq[0] <= r <= lq[6]), qs=round(qscore(lq, r), 6), err=round(r - lq[3], 5), up=int(r > 0))
@@ -336,9 +343,14 @@ def _finish(L: dict, fid: str, e: dict, r: float, dd: float, delisted: bool, tod
     if e.get("lq_m"):
         g["qs_m"] = round(qscore(e["lq_m"], r), 6)     # the model's forecast from the same close, same outcome
     raw = e.get("lqr") or lq
+    if e["src"] == "quant":                        # the published range, for the coverage keeper's replay
+        g["pw10"], g["pw90"] = round(lq[3] - lq[1], 5), round(lq[5] - lq[3], 5)
+        if e.get("aci"):
+            g["aci"] = e["aci"]                    # the keeper's multiplier it was published with
     g["er"] = round(r - raw[3], 5)
     if e.get("tl"):
         g["er0"] = round(r - (raw[3] - float(e["tl"])), 5)
+        g["tl"] = e["tl"]                          # the signal learner's nudge it was published with
     g["w10"], g["w90"] = round(raw[3] - raw[1], 5), round(raw[5] - raw[3], 5)
     g["in80r"] = int(raw[1] <= r <= raw[5])
     if e.get("f"):
@@ -366,6 +378,10 @@ def _finish(L: dict, fid: str, e: dict, r: float, dd: float, delisted: bool, tod
     if "hit" in g:
         a["hits"] += g["hit"]
         a["nhit"] += 1
+        # what the direction calls expected (their own odds for the side picked): the Results tab's "expected"
+        a["pexp"] = round(a.get("pexp", 0.0) + max(g["pup"], 1 - g["pup"]), 4)
+        a["npexp"] = a.get("npexp", 0) + 1                # (counted apart: months graded before this was added)
+        a["hitx"] = a.get("hitx", 0) + g["hit"]            # the hits among those, to compare on the same calls
     if "qsn" in g:
         a["qs"] = round(a["qs"] + g["qs"], 6)
         a["qsn"] = round(a["qsn"] + g["qsn"], 6)
